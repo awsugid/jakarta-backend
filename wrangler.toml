@@ -3,7 +3,7 @@ main = "target/wasm32-unknown-unknown/release/jakarta_backend.wasm"
 compatibility_date = "2024-09-23"
 
 [vars]
-FORMBRICKS_BASE_URL = "https://formbricks.example.com"
+FORMBRICKS_BASE_URL = "https://forms.awscommunity.id"
 ALLOWED_ORIGINS = "https://jakarta.awscommunity.id"
 
 [[d1_databases]]
