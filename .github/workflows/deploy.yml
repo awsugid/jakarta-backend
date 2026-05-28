@@ -62,9 +62,6 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      - name: Build Worker
-        run: cargo build --release --target wasm32-unknown-unknown
-
       - name: Deploy Worker
         uses: cloudflare/wrangler-action@v3
         with:

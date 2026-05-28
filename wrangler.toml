@@ -1,6 +1,9 @@
 name = "jakarta-backend"
-main = "target/wasm32-unknown-unknown/release/jakarta_backend.wasm"
+main = "build/worker/shim.mjs"
 compatibility_date = "2024-09-23"
+
+[build]
+command = "cargo install -q worker-build && worker-build --release"
 
 [vars]
 FORMBRICKS_BASE_URL = "https://forms.awscommunity.id"
