@@ -11,5 +11,5 @@ ALLOWED_ORIGINS = "https://jakarta.awscommunity.id"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "jakarta-backend-db"
-database_id = "placeholder-change-me"
+database_name = "jakarta-backend"
+database_id = "6df70f62-095b-47ab-bbb3-b502892758f5"
