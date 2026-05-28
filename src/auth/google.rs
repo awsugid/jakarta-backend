@@ -28,8 +28,7 @@ pub fn extract_user(req: &Request, _env: &Env) -> Result<AuthUser, AppError> {
 
     // Check for Authorization: Bearer <token>
     if let Ok(Some(auth_header)) = headers.get("Authorization") {
-        if auth_header.starts_with("Bearer ") {
-            let _token = &auth_header[7..];
+        if let Some(_token) = auth_header.strip_prefix("Bearer ") {
             // TODO: Validate JWT token with Google JWKS or Cloudflare Access
             // For now, return unauthorized with a message
             return Err(AppError::Unauthorized(

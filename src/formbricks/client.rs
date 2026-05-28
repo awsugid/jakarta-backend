@@ -30,7 +30,7 @@ impl FormbricksClient {
             self.base_url, survey_id, limit, offset
         );
 
-        let mut headers = Headers::new();
+        let headers = Headers::new();
         headers
             .set("x-api-key", &self.api_key)
             .map_err(|e| format!("failed to set header: {e}"))?;

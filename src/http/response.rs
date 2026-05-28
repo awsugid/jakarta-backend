@@ -9,6 +9,7 @@ pub fn json_success(data: &impl Serialize) -> worker::Result<Response> {
 }
 
 /// Returns an error JSON response with the given status code and CORS headers.
+#[allow(dead_code)]
 pub fn json_error(status: u16, message: &str) -> worker::Result<Response> {
     let body = serde_json::json!({
         "error": {
@@ -35,7 +36,7 @@ pub fn cors_preflight(allowed_origins: &str) -> worker::Result<Response> {
 }
 
 fn cors_headers(allowed_origins: &str) -> Headers {
-    let mut headers = Headers::new();
+    let headers = Headers::new();
     // Ignore errors from setting headers; in a Worker environment these are always valid.
     let _ = headers.set("Access-Control-Allow-Origin", allowed_origins);
     let _ = headers.set(

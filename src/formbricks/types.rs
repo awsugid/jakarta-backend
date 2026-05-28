@@ -38,6 +38,7 @@ pub struct FormbricksMeta {
 }
 
 /// Survey info from FormBricks.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FormbricksSurvey {
     pub id: String,

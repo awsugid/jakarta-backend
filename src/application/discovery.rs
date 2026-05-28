@@ -152,6 +152,7 @@ pub fn is_editable_at(editable_until: Option<&str>, now: &str) -> bool {
 }
 
 /// Check if a FormBricks response's email answer matches the given normalized email.
+#[allow(dead_code)]
 pub fn response_matches_email(
     response: &crate::formbricks::types::FormbricksResponse,
     email_question_id: &str,
@@ -165,12 +166,15 @@ pub fn response_matches_email(
 }
 
 /// Extract and normalize the LinkedIn URL from a FormBricks response.
+#[allow(dead_code)]
 pub fn extract_linkedin_normalized(
     response: &crate::formbricks::types::FormbricksResponse,
     linkedin_question_id: &str,
 ) -> Option<String> {
     let linkedin_raw = extract_answer(response, linkedin_question_id);
-    linkedin_raw.as_deref().and_then(|url| normalize_linkedin_url(url).ok())
+    linkedin_raw
+        .as_deref()
+        .and_then(|url| normalize_linkedin_url(url).ok())
 }
 
 /// Get current UTC time as ISO 8601 string using JS Date via wasm_bindgen.
@@ -179,7 +183,9 @@ fn utc_now_iso_string() -> String {
     utc_now_iso_string_js()
 }
 
-#[wasm_bindgen(inline_js = "export function utc_now_iso_string_js() { return new Date().toISOString(); }")]
+#[wasm_bindgen(
+    inline_js = "export function utc_now_iso_string_js() { return new Date().toISOString(); }"
+)]
 extern "C" {
     fn utc_now_iso_string_js() -> String;
 }
@@ -190,17 +196,19 @@ mod tests {
     use crate::formbricks::types::FormbricksResponse;
     use std::collections::HashMap;
 
-    fn make_response(
-        id: &str,
-        email: Option<&str>,
-        linkedin: Option<&str>,
-    ) -> FormbricksResponse {
+    fn make_response(id: &str, email: Option<&str>, linkedin: Option<&str>) -> FormbricksResponse {
         let mut data = HashMap::new();
         if let Some(e) = email {
-            data.insert("q-email".to_string(), serde_json::Value::String(e.to_string()));
+            data.insert(
+                "q-email".to_string(),
+                serde_json::Value::String(e.to_string()),
+            );
         }
         if let Some(l) = linkedin {
-            data.insert("q-linkedin".to_string(), serde_json::Value::String(l.to_string()));
+            data.insert(
+                "q-linkedin".to_string(),
+                serde_json::Value::String(l.to_string()),
+            );
         }
         FormbricksResponse {
             id: id.to_string(),
@@ -267,19 +275,30 @@ mod tests {
     #[test]
     fn test_email_no_match() {
         let resp = make_response("r1", Some("other@example.com"), None);
-        assert!(!response_matches_email(&resp, "q-email", "user@example.com"));
+        assert!(!response_matches_email(
+            &resp,
+            "q-email",
+            "user@example.com"
+        ));
     }
 
     #[test]
     fn test_email_missing_question() {
         let resp = make_response("r1", Some("user@example.com"), None);
-        assert!(!response_matches_email(&resp, "q-nonexistent", "user@example.com"));
+        assert!(!response_matches_email(
+            &resp,
+            "q-nonexistent",
+            "user@example.com"
+        ));
     }
 
     #[test]
     fn test_email_empty_answer() {
         let mut data = HashMap::new();
-        data.insert("q-email".to_string(), serde_json::Value::String(String::new()));
+        data.insert(
+            "q-email".to_string(),
+            serde_json::Value::String(String::new()),
+        );
         let resp = FormbricksResponse {
             id: "r1".to_string(),
             survey_id: "survey-123".to_string(),
@@ -290,7 +309,11 @@ mod tests {
             contact: None,
         };
         // Empty email normalizes to "", which won't match a real email
-        assert!(!response_matches_email(&resp, "q-email", "user@example.com"));
+        assert!(!response_matches_email(
+            &resp,
+            "q-email",
+            "user@example.com"
+        ));
     }
 
     #[test]
@@ -306,7 +329,11 @@ mod tests {
             data,
             contact: None,
         };
-        assert!(!response_matches_email(&resp, "q-email", "user@example.com"));
+        assert!(!response_matches_email(
+            &resp,
+            "q-email",
+            "user@example.com"
+        ));
     }
 
     // ---- extract_linkedin_normalized ----

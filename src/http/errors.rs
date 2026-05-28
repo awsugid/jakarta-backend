@@ -43,7 +43,7 @@ impl AppError {
                 message: self.message().to_string(),
             },
         };
-        let mut headers = Headers::new();
+        let headers = Headers::new();
         headers.set("Content-Type", "application/json")?;
         let response = Response::from_json(&body)?;
         Ok(response

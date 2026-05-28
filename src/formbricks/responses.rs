@@ -16,6 +16,7 @@ pub fn extract_answer(response: &FormbricksResponse, question_id: &str) -> Optio
 }
 
 /// Check if a response has a non-empty answer for a question.
+#[allow(dead_code)]
 pub fn has_answer(response: &FormbricksResponse, question_id: &str) -> bool {
     extract_answer(response, question_id)
         .map(|s| !s.trim().is_empty())
