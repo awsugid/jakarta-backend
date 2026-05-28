@@ -13,3 +13,18 @@ ALLOWED_ORIGINS = "https://jakarta.awscommunity.id"
 binding = "DB"
 database_name = "jakarta-backend"
 database_id = "6df70f62-095b-47ab-bbb3-b502892758f5"
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1

@@ -20,7 +20,7 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
         // ---------------------------------------------------------------
         // CORS preflight for all /api/* routes
         // ---------------------------------------------------------------
-        .options("/api/*", |_req, ctx| {
+        .options("/api/*rest", |_req, ctx| {
             let config =
                 AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
             cors_preflight(&config.allowed_origins)
