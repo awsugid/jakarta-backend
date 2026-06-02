@@ -62,8 +62,13 @@ impl FormbricksClient {
             ));
         }
 
-        resp.json::<FormbricksResponseList>()
+        let body = resp
+            .text()
             .await
+            .map_err(|e| format!("failed to read FormBricks response text: {e}"))?;
+        worker::console_log!("FormBricks raw response: {}", body);
+
+        serde_json::from_str::<FormbricksResponseList>(&body)
             .map_err(|e| format!("failed to parse FormBricks response: {e}"))
     }
 
@@ -82,7 +87,7 @@ impl FormbricksClient {
             let result = self.list_responses(survey_id, limit, offset).await?;
             all_responses.extend(result.data);
 
-            let total = result.meta.total.unwrap_or(0) as u32;
+            let total = result.meta.as_ref().and_then(|m| m.total).unwrap_or(0) as u32;
             offset += limit;
             pages += 1;
 
@@ -92,6 +97,107 @@ impl FormbricksClient {
         }
 
         Ok(all_responses)
+    }
+
+    /// Delete a response by ID.
+    ///
+    /// Calls `DELETE /api/v2/management/responses/{id}`.
+    pub async fn delete_response(&self, response_id: &str) -> Result<(), String> {
+        let url = format!(
+            "{}/api/v2/management/responses/{}",
+            self.base_url, response_id
+        );
+
+        let headers = Headers::new();
+        headers
+            .set("x-api-key", &self.api_key)
+            .map_err(|e| format!("failed to set header: {e}"))?;
+
+        let req = Request::new_with_init(
+            &url,
+            &RequestInit {
+                headers,
+                method: Method::Delete,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("failed to build request: {e}"))?;
+
+        let mut resp = Fetch::Request(req)
+            .send()
+            .await
+            .map_err(|e| format!("request to FormBricks failed: {e}"))?;
+
+        let status = resp.status_code();
+        if status != 200 && status != 204 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "FormBricks API returned status {status}: {}",
+                truncate(&body, 512)
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Fetch a single response by ID.
+    ///
+    /// Calls `GET /api/v2/management/responses/{id}`.
+    pub async fn get_response(&self, response_id: &str) -> Result<FormbricksResponse, String> {
+        let url = format!(
+            "{}/api/v2/management/responses/{}",
+            self.base_url, response_id
+        );
+
+        let headers = Headers::new();
+        headers
+            .set("x-api-key", &self.api_key)
+            .map_err(|e| format!("failed to set header: {e}"))?;
+        headers
+            .set("Accept", "application/json")
+            .map_err(|e| format!("failed to set header: {e}"))?;
+
+        let req = Request::new_with_init(
+            &url,
+            &RequestInit {
+                headers,
+                method: Method::Get,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("failed to build request: {e}"))?;
+
+        let mut resp = Fetch::Request(req)
+            .send()
+            .await
+            .map_err(|e| format!("request to FormBricks failed: {e}"))?;
+
+        let status = resp.status_code();
+        if status != 200 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "FormBricks API returned status {status}: {}",
+                truncate(&body, 512)
+            ));
+        }
+
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("failed to read FormBricks response text: {e}"))?;
+
+        // Fallback-friendly deserialization: try wrapped {"data": FormbricksResponse} first, then direct FormbricksResponse
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            data: FormbricksResponse,
+        }
+
+        if let Ok(wrapper) = serde_json::from_str::<Wrapper>(&body) {
+            Ok(wrapper.data)
+        } else {
+            serde_json::from_str::<FormbricksResponse>(&body)
+                .map_err(|e| format!("failed to parse FormBricks response: {e}"))
+        }
     }
 }
 

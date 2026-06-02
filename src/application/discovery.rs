@@ -1,6 +1,6 @@
 use crate::auth::user::AuthUser;
 use crate::formbricks::client::FormbricksClient;
-use crate::formbricks::responses::extract_answer;
+use crate::formbricks::responses::extract_answers_list;
 use crate::http::errors::AppError;
 use crate::storage::d1::ApplicationForm;
 use crate::validation::email::normalize_email;
@@ -23,6 +23,8 @@ pub struct DiscoveryResult {
     pub linkedin_url: Option<String>,
     /// Whether the user can still edit this response
     pub editable: bool,
+    /// The timestamp when this application was submitted
+    pub submitted_at: Option<String>,
 }
 
 /// Result of validating a proposed application
@@ -42,6 +44,7 @@ impl DiscoveryResult {
             submitted_email: None,
             linkedin_url: None,
             editable: false,
+            submitted_at: None,
         }
     }
 }
@@ -62,25 +65,32 @@ pub async fn discover_user_application(
     let google_email = user.normalized_email();
 
     for response in &responses {
-        let email_answer = extract_answer(response, &form.email_question_id);
-        if let Some(email) = email_answer {
+        let email_answers = extract_answers_list(response, &form.email_question_id);
+        let mut matching_email = None;
+        for email in email_answers {
             if normalize_email(&email) == google_email {
-                let linkedin_raw = extract_answer(response, &form.linkedin_question_id);
-                let linkedin_normalized = linkedin_raw
-                    .as_deref()
-                    .and_then(|url| normalize_linkedin_url(url).ok());
-
-                let editable = is_editable(editable_until);
-
-                return Ok(DiscoveryResult {
-                    exists: true,
-                    response_id: Some(response.id.clone()),
-                    finished: Some(response.finished),
-                    submitted_email: Some(email),
-                    linkedin_url: linkedin_normalized,
-                    editable,
-                });
+                matching_email = Some(email);
+                break;
             }
+        }
+
+        if let Some(email) = matching_email {
+            let linkedin_answers = extract_answers_list(response, &form.linkedin_question_id);
+            let linkedin_normalized = linkedin_answers
+                .first()
+                .and_then(|url| normalize_linkedin_url(url).ok());
+
+            let editable = is_editable(editable_until);
+
+            return Ok(DiscoveryResult {
+                exists: true,
+                response_id: Some(response.id.clone()),
+                finished: Some(response.finished),
+                submitted_email: Some(email),
+                linkedin_url: linkedin_normalized,
+                editable,
+                submitted_at: Some(response.created_at.clone()),
+            });
         }
     }
 
@@ -107,15 +117,15 @@ pub async fn validate_application(
         .map_err(|e| AppError::FormBricksError(format!("Failed to fetch responses: {}", e)))?;
 
     for response in &responses {
-        let linkedin_raw = extract_answer(response, &form.linkedin_question_id);
-        if let Some(url) = linkedin_raw {
+        let linkedin_answers = extract_answers_list(response, &form.linkedin_question_id);
+        for url in linkedin_answers {
             if let Ok(existing_linkedin) = normalize_linkedin_url(&url) {
                 if existing_linkedin == normalized_linkedin {
                     // Check if this is the same user's response
-                    let email_answer = extract_answer(response, &form.email_question_id);
-                    let is_same_user = email_answer
-                        .map(|e| normalize_email(&e) == google_email)
-                        .unwrap_or(false);
+                    let email_answers = extract_answers_list(response, &form.email_question_id);
+                    let is_same_user = email_answers
+                        .iter()
+                        .any(|e| normalize_email(e) == google_email);
 
                     if !is_same_user {
                         return Ok(ValidationResult {
@@ -158,11 +168,10 @@ pub fn response_matches_email(
     email_question_id: &str,
     normalized_email: &str,
 ) -> bool {
-    let email_answer = extract_answer(response, email_question_id);
-    email_answer
-        .as_ref()
-        .map(|e| normalize_email(e) == normalized_email)
-        .unwrap_or(false)
+    let email_answers = extract_answers_list(response, email_question_id);
+    email_answers
+        .iter()
+        .any(|e| normalize_email(e) == normalized_email)
 }
 
 /// Extract and normalize the LinkedIn URL from a FormBricks response.
@@ -171,9 +180,9 @@ pub fn extract_linkedin_normalized(
     response: &crate::formbricks::types::FormbricksResponse,
     linkedin_question_id: &str,
 ) -> Option<String> {
-    let linkedin_raw = extract_answer(response, linkedin_question_id);
-    linkedin_raw
-        .as_deref()
+    let linkedin_answers = extract_answers_list(response, linkedin_question_id);
+    linkedin_answers
+        .first()
         .and_then(|url| normalize_linkedin_url(url).ok())
 }
 

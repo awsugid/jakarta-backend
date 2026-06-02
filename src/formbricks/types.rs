@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 /// A single response from FormBricks Management API.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FormbricksResponse {
     pub id: String,
     pub survey_id: String,
@@ -17,6 +18,7 @@ pub struct FormbricksResponse {
 
 /// Contact information associated with a FormBricks response.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FormbricksContact {
     pub id: String,
     pub attributes: HashMap<String, serde_json::Value>,
@@ -26,7 +28,8 @@ pub struct FormbricksContact {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FormbricksResponseList {
     pub data: Vec<FormbricksResponse>,
-    pub meta: FormbricksMeta,
+    #[serde(default)]
+    pub meta: Option<FormbricksMeta>,
 }
 
 /// Pagination metadata from the FormBricks API.
@@ -40,6 +43,7 @@ pub struct FormbricksMeta {
 /// Survey info from FormBricks.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FormbricksSurvey {
     pub id: String,
     pub name: String,

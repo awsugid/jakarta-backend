@@ -45,7 +45,7 @@ fn cors_headers(allowed_origins: &str) -> Headers {
     );
     let _ = headers.set(
         "Access-Control-Allow-Headers",
-        "Content-Type, Authorization",
+        "Content-Type, Authorization, X-Debug-User-Email",
     );
     headers
 }
