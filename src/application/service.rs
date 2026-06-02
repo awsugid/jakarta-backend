@@ -208,7 +208,7 @@ pub async fn get_user_response(
             finished: fb_response.finished,
             submitted_at: fb_response.created_at,
             data: serde_json::Value::Object(
-                fb_response.data.into_iter().map(|(k, v)| (k, v)).collect(),
+                fb_response.data.into_iter().collect(),
             ),
         },
     })

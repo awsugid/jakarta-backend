@@ -97,6 +97,7 @@ impl FormRepository {
     }
 
     /// Get a form by its FormBricks survey ID.
+    #[allow(dead_code)]
     pub async fn get_form_by_survey_id(
         &self,
         survey_id: &str,

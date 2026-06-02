@@ -154,7 +154,7 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                 })?;
 
                 let result =
-                    service::get_user_response(&repo, &client, &user, &kind, &slug).await?;
+                    service::get_user_response(&repo, &client, &user, kind, slug).await?;
                 let resp = json_success(&result)?;
                 with_cors(resp, &config.allowed_origins)
             },
@@ -261,7 +261,7 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                 })?;
 
                 let form = repo
-                    .get_form(&kind, &slug)
+                    .get_form(kind, slug)
                     .await
                     .map_err(|e| AppError::Internal(e.to_string()))?
                     .ok_or_else(|| {
