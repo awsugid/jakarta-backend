@@ -243,6 +243,7 @@ impl FormRepository {
     }
 
     /// Update status of a response index (e.g. to 'duplicate_deleted')
+    #[allow(dead_code)]
     pub async fn mark_response_index_status(
         &self,
         formbricks_response_id: &str,

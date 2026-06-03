@@ -235,7 +235,7 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                 .d1("DB")
                 .map_err(|e| AppError::Internal(e.to_string()))?;
             let repo = FormRepository::new(db);
-            let client = FormbricksClient::new(&config);
+            let _client = FormbricksClient::new(&config);
 
             let kind = ctx
                 .param("kind")
@@ -271,7 +271,7 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                     .d1("DB")
                     .map_err(|e| AppError::Internal(e.to_string()))?;
                 let repo = FormRepository::new(db);
-                let client = FormbricksClient::new(&config);
+                let _client = FormbricksClient::new(&config);
 
                 let kind = ctx.param("kind").ok_or_else(|| {
                     AppError::BadRequest("Missing path parameter: kind".to_string())

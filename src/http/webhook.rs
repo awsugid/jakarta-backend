@@ -208,10 +208,10 @@ pub async fn handle_webhook(mut req: Request, ctx: RouteContext<()>) -> Result<R
 
         if let Some(existing) = existing_linkedin_index {
             // Exclude the current response being processed (in case of retry)
-            if existing.formbricks_response_id != payload.data.id {
-                if existing.normalized_email != normalized_proposed_email {
-                    duplicate_found = true;
-                }
+            if existing.formbricks_response_id != payload.data.id
+                && existing.normalized_email != normalized_proposed_email
+            {
+                duplicate_found = true;
             }
         }
     }
