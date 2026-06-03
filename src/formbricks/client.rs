@@ -19,6 +19,7 @@ impl FormbricksClient {
     /// List responses for a survey with pagination.
     ///
     /// Calls `GET /api/v2/management/responses?surveyId=xxx&limit=xx&offset=xx`.
+    #[allow(dead_code)]
     pub async fn list_responses(
         &self,
         survey_id: &str,
@@ -73,6 +74,7 @@ impl FormbricksClient {
     }
 
     /// Fetch all responses for a survey, paginating automatically up to a safety limit.
+    #[allow(dead_code)]
     pub async fn get_all_responses(
         &self,
         survey_id: &str,

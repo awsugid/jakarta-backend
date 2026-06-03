@@ -26,6 +26,7 @@ pub struct FormbricksContact {
 
 /// Paginated response from `GET /api/v2/management/responses`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[allow(dead_code)]
 pub struct FormbricksResponseList {
     pub data: Vec<FormbricksResponse>,
     #[serde(default)]
@@ -34,6 +35,7 @@ pub struct FormbricksResponseList {
 
 /// Pagination metadata from the FormBricks API.
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[allow(dead_code)]
 pub struct FormbricksMeta {
     pub total: Option<u64>,
     pub limit: Option<u64>,
