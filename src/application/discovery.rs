@@ -1,8 +1,7 @@
 use crate::auth::user::AuthUser;
-use crate::formbricks::client::FormbricksClient;
 use crate::formbricks::responses::extract_answers_list;
 use crate::http::errors::AppError;
-use crate::storage::d1::ApplicationForm;
+use crate::storage::d1::{ApplicationForm, FormRepository};
 use crate::validation::email::normalize_email;
 use crate::validation::linkedin::normalize_linkedin_url;
 use serde::Serialize;
@@ -52,46 +51,29 @@ impl DiscoveryResult {
 /// Discover the current user's existing application in a FormBricks survey.
 /// Scans all responses looking for one where the email answer matches the Google email.
 pub async fn discover_user_application(
-    client: &FormbricksClient,
+    repo: &FormRepository,
     form: &ApplicationForm,
     user: &AuthUser,
     editable_until: Option<&str>,
 ) -> Result<DiscoveryResult, AppError> {
-    let responses = client
-        .get_all_responses(&form.formbricks_survey_id, 10)
-        .await
-        .map_err(|e| AppError::FormBricksError(format!("Failed to fetch responses: {}", e)))?;
-
     let google_email = user.normalized_email();
 
-    for response in &responses {
-        let email_answers = extract_answers_list(response, &form.email_question_id);
-        let mut matching_email = None;
-        for email in email_answers {
-            if normalize_email(&email) == google_email {
-                matching_email = Some(email);
-                break;
-            }
-        }
+    let index = repo
+        .get_index_by_form_email(&form.id, &google_email)
+        .await
+        .map_err(|e| AppError::Internal(format!("Database error: {}", e)))?;
 
-        if let Some(email) = matching_email {
-            let linkedin_answers = extract_answers_list(response, &form.linkedin_question_id);
-            let linkedin_normalized = linkedin_answers
-                .first()
-                .and_then(|url| normalize_linkedin_url(url).ok());
-
-            let editable = is_editable(editable_until);
-
-            return Ok(DiscoveryResult {
-                exists: true,
-                response_id: Some(response.id.clone()),
-                finished: Some(response.finished),
-                submitted_email: Some(email),
-                linkedin_url: linkedin_normalized,
-                editable,
-                submitted_at: Some(response.created_at.clone()),
-            });
-        }
+    if let Some(idx) = index {
+        let editable = is_editable(editable_until);
+        return Ok(DiscoveryResult {
+            exists: true,
+            response_id: Some(idx.formbricks_response_id),
+            finished: Some(idx.finished),
+            submitted_email: Some(idx.normalized_email),
+            linkedin_url: idx.normalized_linkedin_url,
+            editable,
+            submitted_at: idx.submitted_at,
+        });
     }
 
     Ok(DiscoveryResult::not_found())
@@ -100,44 +82,30 @@ pub async fn discover_user_application(
 /// Validate whether a proposed application submission is allowed.
 /// Checks for duplicate LinkedIn URL across all responses in this survey.
 pub async fn validate_application(
-    client: &FormbricksClient,
+    repo: &FormRepository,
     form: &ApplicationForm,
     user: &AuthUser,
     proposed_linkedin: &str,
 ) -> Result<ValidationResult, AppError> {
-    // Normalize the proposed LinkedIn URL
     let normalized_linkedin = normalize_linkedin_url(proposed_linkedin)
         .map_err(|e| AppError::BadRequest(format!("Invalid LinkedIn URL: {}", e)))?;
 
-    let google_email = user.normalized_email();
-
-    let responses = client
-        .get_all_responses(&form.formbricks_survey_id, 10)
+    let index = repo
+        .get_index_by_form_linkedin(&form.id, &normalized_linkedin)
         .await
-        .map_err(|e| AppError::FormBricksError(format!("Failed to fetch responses: {}", e)))?;
+        .map_err(|e| AppError::Internal(format!("Database error: {}", e)))?;
 
-    for response in &responses {
-        let linkedin_answers = extract_answers_list(response, &form.linkedin_question_id);
-        for url in linkedin_answers {
-            if let Ok(existing_linkedin) = normalize_linkedin_url(&url) {
-                if existing_linkedin == normalized_linkedin {
-                    // Check if this is the same user's response
-                    let email_answers = extract_answers_list(response, &form.email_question_id);
-                    let is_same_user = email_answers
-                        .iter()
-                        .any(|e| normalize_email(e) == google_email);
-
-                    if !is_same_user {
-                        return Ok(ValidationResult {
-                            ok: false,
-                            code: Some("duplicate_linkedin".to_string()),
-                            message: Some(
-                                "This LinkedIn profile has already been used for this application form.".to_string(),
-                            ),
-                        });
-                    }
-                }
-            }
+    if let Some(idx) = index {
+        let google_email = user.normalized_email();
+        if idx.normalized_email != google_email {
+            return Ok(ValidationResult {
+                ok: false,
+                code: Some("duplicate_linkedin".to_string()),
+                message: Some(
+                    "This LinkedIn profile has already been used for this application form."
+                        .to_string(),
+                ),
+            });
         }
     }
 

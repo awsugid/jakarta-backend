@@ -41,11 +41,68 @@ pub struct FormbricksMeta {
 }
 
 /// Survey info from FormBricks.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FormbricksSurvey {
     pub id: String,
     pub name: String,
     pub status: String,
+    /// Legacy flat questions array (older surveys).
+    #[serde(default)]
+    pub questions: Vec<FormbricksQuestion>,
+    /// Newer block-based structure — elements live inside each block.
+    #[serde(default)]
+    pub blocks: Vec<FormbricksBlock>,
+}
+
+/// A single question / element in a FormBricks survey.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormbricksQuestion {
+    pub id: String,
+    /// Headline is a localized object: { "default": "..." } — may contain HTML.
+    pub headline: serde_json::Value,
+    #[serde(rename = "type")]
+    pub question_type: String,
+}
+
+impl FormbricksQuestion {
+    /// Extract the default headline string and strip any HTML tags.
+    pub fn headline_text(&self) -> String {
+        let raw = match &self.headline {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Object(map) => map
+                .get("default")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            _ => return String::new(),
+        };
+        strip_html(&raw)
+    }
+}
+
+/// Remove HTML tags from a string, returning plain text.
+fn strip_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(ch),
+            _ => {}
+        }
+    }
+    // Collapse whitespace
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A block containing a list of survey elements.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormbricksBlock {
+    pub id: String,
+    #[serde(default)]
+    pub elements: Vec<FormbricksQuestion>,
 }

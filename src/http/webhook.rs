@@ -9,7 +9,7 @@ use worker::*;
 use crate::config::AppConfig;
 use crate::formbricks::client::FormbricksClient;
 use crate::formbricks::responses::extract_answers_list;
-use crate::storage::d1::FormRepository;
+use crate::storage::d1::{ApplicationResponseIndex, FormRepository};
 use crate::validation::email::normalize_email;
 use crate::validation::linkedin::normalize_linkedin_url;
 
@@ -30,6 +30,8 @@ struct WebhookResponseData {
     survey_id: String,
     finished: bool,
     data: HashMap<String, serde_json::Value>,
+    #[serde(rename = "createdAt")]
+    created_at: Option<String>,
 }
 
 /// Verify signature and process the FormBricks webhook.
@@ -187,48 +189,30 @@ pub async fn handle_webhook(mut req: Request, ctx: RouteContext<()>) -> Result<R
     };
     let normalized_proposed_email = normalize_email(&proposed_email);
 
-    // 9. Scan for duplicate LinkedIn URLs in previous responses
+    // 9. Check D1 index for duplicate LinkedIn URLs (Volunteers only)
     let client = FormbricksClient::new(&config);
-    let responses = match client
-        .get_all_responses(&form.formbricks_survey_id, 10)
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            console_log!(
-                "Failed to fetch responses from FormBricks for duplicate check: {}",
-                e
-            );
-            return Response::ok("FormBricks responses fetch error");
-        }
-    };
-
+    let is_volunteer = form.kind == "volunteer";
     let mut duplicate_found = false;
-    for response in &responses {
-        // Exclude the current response being processed by the webhook
-        if response.id == payload.data.id {
-            continue;
-        }
 
-        let linkedin_answers = extract_answers_list(response, &form.linkedin_question_id);
-        for url in linkedin_answers {
-            if let Ok(existing_linkedin) = normalize_linkedin_url(&url) {
-                if existing_linkedin == normalized_proposed_linkedin {
-                    // Check if this duplicate belongs to another user
-                    let email_answers = extract_answers_list(response, &form.email_question_id);
-                    let is_same_user = email_answers
-                        .iter()
-                        .any(|e| normalize_email(e) == normalized_proposed_email);
+    if is_volunteer {
+        let existing_linkedin_index = match repo
+            .get_index_by_form_linkedin(&form.id, &normalized_proposed_linkedin)
+            .await
+        {
+            Ok(idx) => idx,
+            Err(e) => {
+                console_log!("Failed to query duplicate LinkedIn from D1: {}", e);
+                return Response::ok("Database error");
+            }
+        };
 
-                    if !is_same_user {
-                        duplicate_found = true;
-                        break;
-                    }
+        if let Some(existing) = existing_linkedin_index {
+            // Exclude the current response being processed (in case of retry)
+            if existing.formbricks_response_id != payload.data.id {
+                if existing.normalized_email != normalized_proposed_email {
+                    duplicate_found = true;
                 }
             }
-        }
-        if duplicate_found {
-            break;
         }
     }
 
@@ -246,6 +230,39 @@ pub async fn handle_webhook(mut req: Request, ctx: RouteContext<()>) -> Result<R
                 "Successfully deleted duplicate FormBricks response {}",
                 payload.data.id
             );
+        }
+
+        // We can optionally add it to the index as duplicate_deleted, or just skip it
+        // We will skip inserting it to the active index.
+    } else {
+        // No duplicate from another user, upsert into index
+        let new_index = ApplicationResponseIndex {
+            id: format!("idx_{}", payload.data.id),
+            form_id: form.id.clone(),
+            formbricks_survey_id: form.formbricks_survey_id.clone(),
+            formbricks_response_id: payload.data.id.clone(),
+            normalized_email: normalized_proposed_email.clone(),
+            normalized_linkedin_url: Some(normalized_proposed_linkedin.clone()),
+            finished: payload.data.finished,
+            status: "active".to_string(),
+            submitted_at: Some(payload.data.created_at.clone().unwrap_or_default()), // WebhookResponseData missing created_at, wait let's check
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+
+        if let Err(e) = repo.upsert_active_response_index(&new_index).await {
+            console_log!("Failed to upsert active response index: {}", e);
+            return Response::ok("Database error");
+        }
+
+        // Delete old responses in the index for the same form + email (enforce 1-per-user for volunteers)
+        if is_volunteer {
+            if let Err(e) = repo
+                .delete_old_response_index(&form.id, &normalized_proposed_email, &payload.data.id)
+                .await
+            {
+                console_log!("Failed to delete old response index (edit cleanup): {}", e);
+            }
         }
     }
 

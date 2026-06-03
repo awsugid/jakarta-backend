@@ -137,7 +137,7 @@ fn determine_status(form: &ApplicationForm) -> FormPolicyStatus {
 /// List all active forms where the authenticated user has an existing response.
 pub async fn list_user_applications(
     repo: &FormRepository,
-    client: &FormbricksClient,
+    _client: &FormbricksClient, // Unused now but kept for signature consistency
     user: &AuthUser,
 ) -> Result<Vec<UserApplicationSummary>, AppError> {
     let forms = repo
@@ -145,26 +145,29 @@ pub async fn list_user_applications(
         .await
         .map_err(|e| AppError::Internal(format!("Database error: {}", e)))?;
 
+    let indexes = repo
+        .list_indexes_by_email(&user.normalized_email())
+        .await
+        .map_err(|e| AppError::Internal(format!("Database error: {}", e)))?;
+
     let mut summaries = Vec::new();
 
-    for form in &forms {
-        let discovery =
-            discover_user_application(client, form, user, form.editable_until.as_deref()).await?;
+    for form in forms {
+        // Find ALL active response indexes for this form (e.g. for multiple speaker submissions)
+        let matching_indexes: Vec<_> = indexes.iter().filter(|i| i.form_id == form.id).collect();
 
-        if discovery.exists {
-            if let Some(response_id) = discovery.response_id {
-                let editable = policy::is_form_editable(form);
-                summaries.push(UserApplicationSummary {
-                    kind: form.kind.clone(),
-                    slug: form.slug.clone(),
-                    title: form.title.clone(),
-                    description: form.description.clone(),
-                    response_id,
-                    finished: discovery.finished.unwrap_or(false),
-                    editable,
-                    submitted_at: discovery.submitted_at.unwrap_or_default(),
-                });
-            }
+        for idx in matching_indexes {
+            let editable = policy::is_form_editable(&form);
+            summaries.push(UserApplicationSummary {
+                kind: form.kind.clone(),
+                slug: form.slug.clone(),
+                title: form.title.clone(),
+                description: form.description.clone(),
+                response_id: idx.formbricks_response_id.clone(),
+                finished: idx.finished,
+                editable,
+                submitted_at: idx.submitted_at.clone().unwrap_or_default(),
+            });
         }
     }
 
@@ -186,7 +189,7 @@ pub async fn get_user_response(
         .ok_or_else(|| AppError::NotFound(format!("Form {}/{} not found", kind, slug)))?;
 
     let discovery =
-        discover_user_application(client, &form, user, form.editable_until.as_deref()).await?;
+        discover_user_application(repo, &form, user, form.editable_until.as_deref()).await?;
 
     let response_id = discovery.response_id.ok_or_else(|| {
         AppError::NotFound("No existing response found for this user and form".to_string())

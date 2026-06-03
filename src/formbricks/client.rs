@@ -1,4 +1,4 @@
-use super::types::{FormbricksResponse, FormbricksResponseList};
+use super::types::{FormbricksResponse, FormbricksResponseList, FormbricksSurvey};
 use crate::config::AppConfig;
 use worker::{Fetch, Headers, Method, Request, RequestInit};
 
@@ -197,6 +197,63 @@ impl FormbricksClient {
         } else {
             serde_json::from_str::<FormbricksResponse>(&body)
                 .map_err(|e| format!("failed to parse FormBricks response: {e}"))
+        }
+    }
+
+    /// Fetch a survey definition including questions.
+    ///
+    /// Calls `GET /api/v1/management/surveys/{surveyId}`.
+    pub async fn get_survey(&self, survey_id: &str) -> Result<FormbricksSurvey, String> {
+        let url = format!("{}/api/v1/management/surveys/{}", self.base_url, survey_id);
+
+        let headers = Headers::new();
+        headers
+            .set("x-api-key", &self.api_key)
+            .map_err(|e| format!("failed to set header: {e}"))?;
+        headers
+            .set("Accept", "application/json")
+            .map_err(|e| format!("failed to set header: {e}"))?;
+
+        let req = Request::new_with_init(
+            &url,
+            &RequestInit {
+                headers,
+                method: Method::Get,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("failed to build request: {e}"))?;
+
+        let mut resp = Fetch::Request(req)
+            .send()
+            .await
+            .map_err(|e| format!("request to FormBricks failed: {e}"))?;
+
+        let status = resp.status_code();
+        if status != 200 {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "FormBricks API returned status {status}: {}",
+                truncate(&body, 512)
+            ));
+        }
+
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| format!("failed to read FormBricks response text: {e}"))?;
+
+        // Try wrapped response first, then direct
+        #[derive(serde::Deserialize)]
+        struct Wrapper {
+            data: FormbricksSurvey,
+        }
+
+        if let Ok(wrapper) = serde_json::from_str::<Wrapper>(&body) {
+            Ok(wrapper.data)
+        } else {
+            serde_json::from_str::<FormbricksSurvey>(&body)
+                .map_err(|e| format!("failed to parse FormBricks survey: {e}"))
         }
     }
 }

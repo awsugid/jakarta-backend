@@ -112,6 +112,71 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             with_cors(resp, &config.allowed_origins)
         })
         // ---------------------------------------------------------------
+        // GET /api/forms/:kind/:slug/schema — get question labels for a form
+        // ---------------------------------------------------------------
+        .get_async("/api/forms/:kind/:slug/schema", |_req, ctx| async move {
+            let config =
+                AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+            let db = ctx
+                .d1("DB")
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            let repo = FormRepository::new(db);
+            let client = FormbricksClient::new(&config);
+
+            let kind = ctx
+                .param("kind")
+                .ok_or_else(|| AppError::BadRequest("Missing path parameter: kind".to_string()))?;
+            let slug = ctx
+                .param("slug")
+                .ok_or_else(|| AppError::BadRequest("Missing path parameter: slug".to_string()))?;
+
+            // Get the form to retrieve survey_id
+            let form = repo
+                .get_form(kind, slug)
+                .await
+                .map_err(|e| AppError::Internal(e.to_string()))?
+                .ok_or_else(|| AppError::NotFound(format!("Form {}/{} not found", kind, slug)))?;
+
+            // Fetch survey definition from FormBricks
+            let survey = client
+                .get_survey(&form.formbricks_survey_id)
+                .await
+                .map_err(|e| AppError::FormBricksError(format!("Failed to fetch survey: {}", e)))?;
+
+            // Build a map of question ID -> { label, type }.
+            // Support both legacy `questions[]` and newer `blocks[].elements[]`.
+            let mut question_labels = std::collections::HashMap::new();
+
+            for question in &survey.questions {
+                let label = question.headline_text();
+                if !label.is_empty() {
+                    question_labels.insert(
+                        question.id.clone(),
+                        serde_json::json!({ "label": label, "type": question.question_type }),
+                    );
+                }
+            }
+
+            for block in &survey.blocks {
+                for element in &block.elements {
+                    let label = element.headline_text();
+                    if !label.is_empty() {
+                        question_labels.insert(
+                            element.id.clone(),
+                            serde_json::json!({ "label": label, "type": element.question_type }),
+                        );
+                    }
+                }
+            }
+
+            let result = serde_json::json!({
+                "questions": question_labels,
+            });
+
+            let resp = json_success(&result)?;
+            with_cors(resp, &config.allowed_origins)
+        })
+        // ---------------------------------------------------------------
         // GET /api/applications/summary — list all user's existing applications
         // Registered BEFORE /:kind/:slug to avoid "summary" matching as :kind.
         // ---------------------------------------------------------------
@@ -186,7 +251,7 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                 .ok_or_else(|| AppError::NotFound(format!("Form {}/{} not found", kind, slug)))?;
 
             let result =
-                discover_user_application(&client, &form, &user, form.editable_until.as_deref())
+                discover_user_application(&repo, &form, &user, form.editable_until.as_deref())
                     .await?;
 
             let resp = json_success(&result)?;
@@ -232,7 +297,7 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                         AppError::NotFound(format!("Form {}/{} not found", kind, slug))
                     })?;
 
-                let result = validate_application(&client, &form, &user, linkedin_url).await?;
+                let result = validate_application(&repo, &form, &user, linkedin_url).await?;
                 let resp = json_success(&result)?;
                 with_cors(resp, &config.allowed_origins)
             },
@@ -288,7 +353,7 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
 
                     let client = FormbricksClient::new(&config);
                     let discovery = crate::application::discovery::discover_user_application(
-                        &client,
+                        &repo,
                         &form,
                         &user,
                         form.editable_until.as_deref(),
@@ -321,8 +386,16 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                         .into());
                     }
 
+                    // Pre-fill the email with the user's Google email
+                    let mut prefill_data = std::collections::HashMap::new();
+                    prefill_data.insert(
+                        form.email_question_id.clone(),
+                        serde_json::Value::String(user.email.clone()),
+                    );
+                    let prefilled_url = service::build_prefilled_url(&public_url, &prefill_data);
+
                     serde_json::json!({
-                        "url": public_url,
+                        "url": prefilled_url,
                         "editable": policy::is_form_editable(&form),
                     })
                 };

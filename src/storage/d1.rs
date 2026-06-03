@@ -120,3 +120,163 @@ impl FormRepository {
             .await
     }
 }
+
+/// Represents a row from the application_response_index table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplicationResponseIndex {
+    pub id: String,
+    pub form_id: String,
+    pub formbricks_survey_id: String,
+    pub formbricks_response_id: String,
+    pub normalized_email: String,
+    pub normalized_linkedin_url: Option<String>,
+    #[serde(deserialize_with = "deserialize_d1_bool")]
+    pub finished: bool,
+    pub status: String,
+    pub submitted_at: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl FormRepository {
+    /// Get active response index by form ID and normalized email
+    pub async fn get_index_by_form_email(
+        &self,
+        form_id: &str,
+        normalized_email: &str,
+    ) -> WorkerResult<Option<ApplicationResponseIndex>> {
+        let sql = "SELECT * FROM application_response_index WHERE form_id = ? AND normalized_email = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1";
+        self.db
+            .prepare(sql)
+            .bind(&[
+                JsValue::from_str(form_id),
+                JsValue::from_str(normalized_email),
+            ])?
+            .first::<ApplicationResponseIndex>(None)
+            .await
+    }
+
+    /// List active response indexes by normalized email
+    pub async fn list_indexes_by_email(
+        &self,
+        normalized_email: &str,
+    ) -> WorkerResult<Vec<ApplicationResponseIndex>> {
+        let sql = "SELECT * FROM application_response_index WHERE normalized_email = ? AND status = 'active'";
+        let result = self
+            .db
+            .prepare(sql)
+            .bind(&[JsValue::from_str(normalized_email)])?
+            .all()
+            .await?;
+        result.results::<ApplicationResponseIndex>()
+    }
+
+    /// Get active response index by form ID and normalized linkedin url
+    pub async fn get_index_by_form_linkedin(
+        &self,
+        form_id: &str,
+        normalized_linkedin_url: &str,
+    ) -> WorkerResult<Option<ApplicationResponseIndex>> {
+        let sql = "SELECT * FROM application_response_index WHERE form_id = ? AND normalized_linkedin_url = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1";
+        self.db
+            .prepare(sql)
+            .bind(&[
+                JsValue::from_str(form_id),
+                JsValue::from_str(normalized_linkedin_url),
+            ])?
+            .first::<ApplicationResponseIndex>(None)
+            .await
+    }
+
+    /// Upsert an active response into the index
+    pub async fn upsert_active_response_index(
+        &self,
+        index: &ApplicationResponseIndex,
+    ) -> WorkerResult<()> {
+        let sql = r#"
+            INSERT INTO application_response_index (
+                id, form_id, formbricks_survey_id, formbricks_response_id,
+                normalized_email, normalized_linkedin_url, finished, status, submitted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(form_id, formbricks_response_id) DO UPDATE SET
+                normalized_email = excluded.normalized_email,
+                normalized_linkedin_url = excluded.normalized_linkedin_url,
+                finished = excluded.finished,
+                status = excluded.status,
+                submitted_at = excluded.submitted_at,
+                updated_at = datetime('now')
+        "#;
+
+        let id = JsValue::from_str(&index.id);
+        let form_id = JsValue::from_str(&index.form_id);
+        let survey_id = JsValue::from_str(&index.formbricks_survey_id);
+        let response_id = JsValue::from_str(&index.formbricks_response_id);
+        let email = JsValue::from_str(&index.normalized_email);
+        let linkedin = match &index.normalized_linkedin_url {
+            Some(l) => JsValue::from_str(l),
+            None => JsValue::null(),
+        };
+        let finished = JsValue::from_bool(index.finished);
+        let status = JsValue::from_str(&index.status);
+        let submitted_at = match &index.submitted_at {
+            Some(s) => JsValue::from_str(s),
+            None => JsValue::null(),
+        };
+
+        self.db
+            .prepare(sql)
+            .bind(&[
+                id,
+                form_id,
+                survey_id,
+                response_id,
+                email,
+                linkedin,
+                finished,
+                status,
+                submitted_at,
+            ])?
+            .run()
+            .await?;
+
+        Ok(())
+    }
+
+    /// Update status of a response index (e.g. to 'duplicate_deleted')
+    pub async fn mark_response_index_status(
+        &self,
+        formbricks_response_id: &str,
+        status: &str,
+    ) -> WorkerResult<()> {
+        let sql = "UPDATE application_response_index SET status = ?, updated_at = datetime('now') WHERE formbricks_response_id = ?";
+        self.db
+            .prepare(sql)
+            .bind(&[
+                JsValue::from_str(status),
+                JsValue::from_str(formbricks_response_id),
+            ])?
+            .run()
+            .await?;
+        Ok(())
+    }
+
+    /// Delete old response for same form and email if it exists (for edit flow)
+    pub async fn delete_old_response_index(
+        &self,
+        form_id: &str,
+        normalized_email: &str,
+        current_response_id: &str,
+    ) -> WorkerResult<()> {
+        let sql = "UPDATE application_response_index SET status = 'deleted', updated_at = datetime('now') WHERE form_id = ? AND normalized_email = ? AND formbricks_response_id != ?";
+        self.db
+            .prepare(sql)
+            .bind(&[
+                JsValue::from_str(form_id),
+                JsValue::from_str(normalized_email),
+                JsValue::from_str(current_response_id),
+            ])?
+            .run()
+            .await?;
+        Ok(())
+    }
+}
