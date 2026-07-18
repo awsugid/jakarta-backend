@@ -320,7 +320,7 @@ pub async fn get_community_statistics(
             .unwrap_or(999)
     }
     let mut age_vec: Vec<(String, u64)> = age_counts.into_iter().collect();
-    age_vec.sort_by(|a, b| age_sort_key(&a.0).cmp(&age_sort_key(&b.0)));
+    age_vec.sort_by_key(|a| age_sort_key(&a.0));
     merged.age_distribution_this_year = age_vec
         .into_iter()
         .map(|(label, count)| LabelCount { label, count })
@@ -350,5 +350,5 @@ fn current_year_utc() -> u32 {
     // js_sys::Date works in Workers; std::time panics.
     let now_ms = js_sys::Date::now();
     let date = js_sys::Date::new(&js_sys::Number::from(now_ms));
-    date.get_full_year() as u32
+    date.get_full_year()
 }
