@@ -11,6 +11,9 @@ use crate::http::response::{cors_preflight, json_success, with_cors};
 use crate::storage::d1::FormRepository;
 
 /// Wire all HTTP routes onto the worker Router.
+///
+/// Note: worker 0.8 has no middleware API. Admin auth is enforced per-handler
+/// via `require_admin`. Keep every `/api/admin/*` handler calling it.
 pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
     router
         // ---------------------------------------------------------------
@@ -22,6 +25,159 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
         // ---------------------------------------------------------------
         .post_async("/api/webhook/formbricks", |req, ctx| async move {
             crate::http::webhook::handle_webhook(req, ctx).await
+        })
+        // ---------------------------------------------------------------
+        // GET /api/events/:siteSlug/pretix-stats — Pretix aggregate stats (public)
+        // ---------------------------------------------------------------
+        .get_async(
+            "/api/events/:siteSlug/pretix-stats",
+            |req, ctx| async move {
+                let config =
+                    AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+
+                let site_slug = ctx
+                    .param("siteSlug")
+                    .ok_or_else(|| AppError::BadRequest("Missing siteSlug".to_string()))?;
+
+                let url = req.url().map_err(|e| AppError::Internal(e.to_string()))?;
+                let qs: std::collections::HashMap<_, _> = url.query_pairs().into_owned().collect();
+
+                let org = qs
+                    .get("organizer_slug")
+                    .ok_or_else(|| AppError::BadRequest("Missing organizer_slug".to_string()))?;
+                let evt = qs
+                    .get("event_slug")
+                    .ok_or_else(|| AppError::BadRequest("Missing event_slug".to_string()))?;
+                let sub = qs.get("subevent_id");
+                let items: Option<Vec<u64>> = qs.get("item_ids").and_then(|s| {
+                    let v: Vec<u64> = s.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+                    if v.is_empty() {
+                        None
+                    } else {
+                        Some(v)
+                    }
+                });
+
+                let client = crate::pretix::client::PretixClient::new(&config);
+
+                // Auto-discover first check-in list when not provided.
+                let list = match qs.get("checkin_list_id") {
+                    Some(l) if !l.trim().is_empty() => l.clone(),
+                    _ => client.get_first_checkin_list_id(org, evt).await.map_err(|e| {
+                        AppError::Internal(format!("Pretix checkinlist lookup: {e}"))
+                    })?,
+                };
+
+                let registered = client
+                    .get_position_count(
+                        org,
+                        evt,
+                        &list,
+                        false,
+                        sub.map(|s| s.as_str()),
+                        items.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| AppError::Internal(format!("Pretix: {}", e)))?;
+
+                let checked_in = client
+                    .get_position_count(
+                        org,
+                        evt,
+                        &list,
+                        true,
+                        sub.map(|s| s.as_str()),
+                        items.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| AppError::Internal(format!("Pretix: {}", e)))?;
+
+                let rate = if registered > 0 {
+                    Some(checked_in as f64 / registered as f64)
+                } else {
+                    None
+                };
+
+                let now = (js_sys::Date::now() / 1000.0) as u64;
+
+                let result = serde_json::json!({
+                    "site_slug": site_slug,
+                    "pretix": {
+                        "organizer_slug": org,
+                        "event_slug": evt,
+                        "checkin_list_id": list,
+                        "subevent_id": sub,
+                    },
+                    "registered_count": registered,
+                    "checked_in_count": checked_in,
+                    "attendance_rate": rate,
+                    "last_refreshed_at": now.to_string(),
+                    "stale": false,
+                });
+
+                let resp = json_success(&result)?;
+                with_cors(resp, &config.allowed_origins)
+            },
+        )
+        // ---------------------------------------------------------------
+        // Admin — Re-ingest application_response_index from Formbricks
+        // ---------------------------------------------------------------
+        .post_async("/api/admin/reingest", |req, ctx| async move {
+            crate::http::reingest::handle_reingest(req, ctx).await
+        })
+        // ---------------------------------------------------------------
+        // Admin — identity & dashboard (admin-only, origin-reflected CORS)
+        // ---------------------------------------------------------------
+        .get_async("/api/admin/me", |req, ctx| async move {
+            crate::http::admin::handle_admin_me(req, ctx).await
+        })
+        .get_async("/api/admin/forms", |req, ctx| async move {
+            crate::http::admin::handle_admin_forms(req, ctx).await
+        })
+        .get_async("/api/admin/formbricks/responses", |req, ctx| async move {
+            crate::http::admin::handle_admin_responses(req, ctx).await
+        })
+        .get_async(
+            "/api/admin/formbricks/responses/:responseId",
+            |req, ctx| async move {
+                crate::http::admin::handle_admin_response_detail(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
+        // GET /api/pretix/me/orders — authenticated user order history
+        // ---------------------------------------------------------------
+        .get_async("/api/pretix/me/orders", |req, ctx| async move {
+            crate::http::user_orders::handle_my_pretix_orders(req, ctx).await
+        })
+        // ---------------------------------------------------------------
+        // GET /api/community/statistics — merged community stats (public, cached 1h)
+        // ---------------------------------------------------------------
+        .get_async("/api/community/statistics", |_req, ctx| async move {
+            let config =
+                AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+            let db = ctx
+                .d1("DB")
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+
+            // Cloudflare Cache API — 1h TTL, cache-first.
+            // Versioned key so code/data changes invalidate.
+            let cache_key = "https://jakarta-backend.local/api/community/statistics?v=7";
+            let cache = worker::Cache::default();
+            if let Some(cached) = cache.get(cache_key, true).await.ok().flatten() {
+                return with_cors(cached, &config.allowed_origins);
+            }
+
+            let stats =
+                crate::statistics::service::get_community_statistics(&config, &db).await?;
+            let mut resp = json_success(&stats)?;
+
+            // Cache API requires a Response with Cache-Control header.
+            let mut cached_resp = resp.cloned()?;
+            let cache_headers = cached_resp.headers_mut();
+            cache_headers.set("Cache-Control", "public, max-age=3600")?;
+            cache.put(cache_key, cached_resp).await.ok();
+
+            with_cors(resp, &config.allowed_origins)
         })
         // ---------------------------------------------------------------
         // CORS preflight for all /api/* routes

@@ -1,0 +1,9 @@
+[project]
+name = "jakarta-backend-scripts"
+version = "0.1.0"
+description = "Utility scripts for jakarta-backend"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.uv]
+package = false

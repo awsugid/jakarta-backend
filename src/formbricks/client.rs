@@ -67,10 +67,13 @@ impl FormbricksClient {
             .text()
             .await
             .map_err(|e| format!("failed to read FormBricks response text: {e}"))?;
-        worker::console_log!("FormBricks raw response: {}", body);
 
-        serde_json::from_str::<FormbricksResponseList>(&body)
-            .map_err(|e| format!("failed to parse FormBricks response: {e}"))
+        let parsed = serde_json::from_str::<FormbricksResponseList>(&body)
+            .map_err(|e| format!("failed to parse FormBricks response: {e}"));
+        if parsed.is_ok() {
+            worker::console_log!("FormBricks survey {} responses page fetched", survey_id);
+        }
+        parsed
     }
 
     /// Fetch all responses for a survey, paginating automatically up to a safety limit.

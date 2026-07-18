@@ -5,9 +5,13 @@ pub struct AppConfig {
     pub formbricks_base_url: String,
     pub formbricks_api_key: String,
     pub formbricks_webhook_secret: String,
+    pub pretix_base_url: String,
+    pub pretix_api_token: String,
+    pub pretix_default_organizer: String,
     pub allowed_origins: String,
     pub google_client_id: String,
     pub enable_debug_auth: bool,
+    pub admin_emails: Vec<String>,
 }
 
 impl AppConfig {
@@ -17,6 +21,12 @@ impl AppConfig {
         let formbricks_webhook_secret = env
             .secret("FORMBRICKS_WEBHOOK_SECRET")
             .map(|s| s.to_string())
+            .unwrap_or_default();
+        let pretix_base_url = env.var("PRETIX_API_BASE_URL")?.to_string();
+        let pretix_api_token = env.secret("PRETIX_API_TOKEN")?.to_string();
+        let pretix_default_organizer = env
+            .var("PRETIX_DEFAULT_ORGANIZER")
+            .map(|v| v.to_string())
             .unwrap_or_default();
         let allowed_origins = env
             .var("ALLOWED_ORIGINS")
@@ -30,13 +40,36 @@ impl AppConfig {
             .var("ENABLE_DEBUG_AUTH")
             .map(|v| v.to_string() == "true")
             .unwrap_or(false);
+        let admin_emails = env
+            .var("ADMIN_EMAILS")
+            .map(|v| parse_admin_emails(&v.to_string()))
+            .unwrap_or_default();
         Ok(Self {
             formbricks_base_url,
             formbricks_api_key,
             formbricks_webhook_secret,
+            pretix_base_url,
+            pretix_api_token,
+            pretix_default_organizer,
             allowed_origins,
             google_client_id,
             enable_debug_auth,
+            admin_emails,
         })
     }
+
+    /// True if the given email is in the configured admin allow-list.
+    /// Comparison is case-insensitive after trim+lowercase.
+    pub fn is_admin(&self, email: &str) -> bool {
+        let normalized = email.trim().to_lowercase();
+        self.admin_emails.iter().any(|e| e == &normalized)
+    }
+}
+
+/// Parse a comma-separated ADMIN_EMAILS value into a lowercased, trimmed Vec.
+fn parse_admin_emails(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
