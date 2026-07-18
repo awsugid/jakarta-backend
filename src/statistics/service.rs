@@ -75,6 +75,12 @@ pub async fn get_community_statistics(
         ));
     }
 
+    let company_excluded = &config.company_exclusion_keywords;
+    let is_company_excluded = |name: &str| -> bool {
+        let l = name.to_lowercase();
+        l == "personal" || company_excluded.iter().any(|kw| l.contains(kw.as_str()))
+    };
+
     let client = PretixClient::new(config);
     let events = match client.list_events_for_year(organizer, current_year).await {
         Ok(v) => v,
@@ -147,27 +153,7 @@ pub async fn get_community_statistics(
                         // Company/Organization/Institution (text) — raw, no normalization
                         // Skip university/student institutions to surface professional companies.
                         "JYJLKVCH" => {
-                            let l = val.to_lowercase();
-                            let is_excluded = l.contains("univ")
-                                || l.contains("college")
-                                || l.contains("school")
-                                || l.contains("sekolah")
-                                || l.contains("akademi")
-                                || l.contains("politeknik")
-                                || l.contains("poltek")
-                                || l.contains("institute")
-                                || l.contains("institut")
-                                || l.contains("sma ")
-                                || l.starts_with("sma")
-                                || l.contains("smk ")
-                                || l.starts_with("smk")
-                                || l.contains("smkn")
-                                || l.contains("mts")
-                                || l.contains("stt")
-                                || l == "personal"
-                                || l.contains("imam")
-                                || l.contains("binus");
-                            if !is_excluded {
+                            if !is_company_excluded(&val) {
                                 *company_counts.entry(val).or_insert(0) += 1;
                             }
                         }
@@ -203,30 +189,8 @@ pub async fn get_community_statistics(
             // Apply same exclusion filter for consistency.
             if let Some(c) = p.get("company").and_then(|v| v.as_str()) {
                 let c = c.trim();
-                if !c.is_empty() {
-                    let l = c.to_lowercase();
-                    let is_excluded = l.contains("univ")
-                        || l.contains("college")
-                        || l.contains("school")
-                        || l.contains("sekolah")
-                        || l.contains("akademi")
-                        || l.contains("politeknik")
-                        || l.contains("poltek")
-                        || l.contains("institute")
-                        || l.contains("institut")
-                        || l.contains("sma ")
-                        || l.starts_with("sma")
-                        || l.contains("smk ")
-                        || l.starts_with("smk")
-                        || l.contains("smkn")
-                        || l.contains("mts")
-                        || l.contains("stt")
-                        || l == "personal"
-                        || l.contains("imam")
-                        || l.contains("binus");
-                    if !is_excluded {
-                        *company_counts.entry(c.to_string()).or_insert(0) += 1;
-                    }
+                if !c.is_empty() && !is_company_excluded(c) {
+                    *company_counts.entry(c.to_string()).or_insert(0) += 1;
                 }
             }
         }

@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub google_client_id: String,
     pub enable_debug_auth: bool,
     pub admin_emails: Vec<String>,
+    pub company_exclusion_keywords: Vec<String>,
 }
 
 impl AppConfig {
@@ -44,6 +45,10 @@ impl AppConfig {
             .var("ADMIN_EMAILS")
             .map(|v| parse_admin_emails(&v.to_string()))
             .unwrap_or_default();
+        let company_exclusion_keywords = env
+            .var("COMPANY_EXCLUSION_KEYWORDS")
+            .map(|v| parse_keywords(&v.to_string()))
+            .unwrap_or_else(|_| default_company_exclusion_keywords());
         Ok(Self {
             formbricks_base_url,
             formbricks_api_key,
@@ -55,6 +60,7 @@ impl AppConfig {
             google_client_id,
             enable_debug_auth,
             admin_emails,
+            company_exclusion_keywords,
         })
     }
 
@@ -72,4 +78,39 @@ fn parse_admin_emails(raw: &str) -> Vec<String> {
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
         .collect()
+}
+
+/// Parse a comma-separated keyword list into a lowercased, trimmed Vec.
+fn parse_keywords(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Default exclusion keywords for company filter (used when env var unset).
+/// Catches universities, schools, and personal/student entries across EN + ID.
+fn default_company_exclusion_keywords() -> Vec<String> {
+    [
+        "univ",
+        "college",
+        "school",
+        "sekolah",
+        "akademi",
+        "politeknik",
+        "poltek",
+        "institute",
+        "institut",
+        "sma",
+        "smk",
+        "smkn",
+        "mts",
+        "stt",
+        "personal",
+        "imam",
+        "binus",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
 }

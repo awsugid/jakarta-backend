@@ -161,7 +161,7 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
 
             // Cloudflare Cache API — 1h TTL, cache-first.
             // Versioned key so code/data changes invalidate.
-            let cache_key = "https://jakarta-backend.local/api/community/statistics?v=7";
+            let cache_key = "https://jakarta-backend.local/api/community/statistics?v=8";
             let cache = worker::Cache::default();
             if let Some(cached) = cache.get(cache_key, true).await.ok().flatten() {
                 return with_cors(cached, &config.allowed_origins);
