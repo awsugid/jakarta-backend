@@ -5,6 +5,7 @@ mod auth;
 mod config;
 mod formbricks;
 mod http;
+mod links;
 mod pretix;
 mod statistics;
 mod storage;

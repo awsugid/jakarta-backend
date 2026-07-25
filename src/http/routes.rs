@@ -180,6 +180,33 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             with_cors(resp, &config.allowed_origins)
         })
         // ---------------------------------------------------------------
+        // Public — Linktree community page
+        // ---------------------------------------------------------------
+        .get_async("/api/links", |req, ctx| async move {
+            crate::http::links::handle_public_links(req, ctx).await
+        })
+        // ---------------------------------------------------------------
+        // Admin — Linktree management
+        // ---------------------------------------------------------------
+        .get_async("/api/admin/links", |req, ctx| async move {
+            crate::http::links::handle_admin_links(req, ctx).await
+        })
+        .put_async("/api/admin/links/page", |req, ctx| async move {
+            crate::http::links::handle_admin_update_page(req, ctx).await
+        })
+        .post_async("/api/admin/links/items", |req, ctx| async move {
+            crate::http::links::handle_admin_create_link(req, ctx).await
+        })
+        .put_async("/api/admin/links/items/:linkId", |req, ctx| async move {
+            crate::http::links::handle_admin_update_link(req, ctx).await
+        })
+        .delete_async("/api/admin/links/items/:linkId", |req, ctx| async move {
+            crate::http::links::handle_admin_delete_link(req, ctx).await
+        })
+        .put_async("/api/admin/links/order", |req, ctx| async move {
+            crate::http::links::handle_admin_reorder(req, ctx).await
+        })
+        // ---------------------------------------------------------------
         // CORS preflight for all /api/* routes
         // ---------------------------------------------------------------
         .options("/api/*rest", |_req, ctx| {

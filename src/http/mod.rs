@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod errors;
+pub mod links;
 pub mod reingest;
 pub mod response;
 pub mod routes;
