@@ -50,8 +50,6 @@ where
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkPage {
-    #[serde(skip_serializing)]
-    pub id: i32,
     pub title: String,
     pub bio: Option<String>,
     #[serde(alias = "avatar_url")]

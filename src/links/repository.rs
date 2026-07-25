@@ -18,7 +18,7 @@ impl LinkRepository {
 
     /// Read the singleton `link_page` row. Internal error if the seed row is missing.
     pub async fn get_page(&self) -> WorkerResult<LinkPage> {
-        let sql = "SELECT id, title, bio, avatar_url, background, button_style, updated_at FROM link_page WHERE id = 1";
+        let sql = "SELECT title, bio, avatar_url, background, button_style, updated_at FROM link_page WHERE id = 1";
         self.db
             .prepare(sql)
             .first::<LinkPage>(None)

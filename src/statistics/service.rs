@@ -152,10 +152,8 @@ pub async fn get_community_statistics(
                         }
                         // Company/Organization/Institution (text) — raw, no normalization
                         // Skip university/student institutions to surface professional companies.
-                        "JYJLKVCH" => {
-                            if !is_company_excluded(&val) {
-                                *company_counts.entry(val).or_insert(0) += 1;
-                            }
+                        "JYJLKVCH" if !is_company_excluded(&val) => {
+                            *company_counts.entry(val).or_insert(0) += 1;
                         }
                         // Position (choice)
                         "UVXYZSPW" => {
