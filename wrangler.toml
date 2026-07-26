@@ -1,12 +1,11 @@
 name = "jakarta-backend"
 main = "build/worker/shim.mjs"
 compatibility_date = "2024-09-23"
+keep_vars = true
 
 [build]
 command = "cargo install -q worker-build && worker-build --release"
 
-[vars]
-FORMBRICKS_BASE_URL = "https://forms.awscommunity.id"
 ALLOWED_ORIGINS = "*"
 GOOGLE_CLIENT_ID = "429454264649-uq35pi9hari5volodi876dtbqvuq30ld.apps.googleusercontent.com"
 ENABLE_DEBUG_AUTH = "false"
