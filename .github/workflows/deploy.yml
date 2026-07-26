@@ -74,7 +74,3 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          secrets: |
-            FORMBRICKS_API_KEY
-        env:
-          FORMBRICKS_API_KEY: ${{ secrets.FORMBRICKS_API_KEY }}
