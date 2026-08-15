@@ -25,7 +25,8 @@ struct ReingestResult {
 /// and populates/updates the D1 index.
 pub async fn handle_reingest(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-    require_admin(&req, &config).await?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
 
     let db = ctx
         .d1("DB")

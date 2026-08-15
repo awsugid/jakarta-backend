@@ -281,3 +281,178 @@ impl FormRepository {
         Ok(())
     }
 }
+
+/// Represents a row from the profiles table.
+/// Internal model: `links_json` stays a raw string; API layers parse it via
+/// `Profile::links()` so it never leaks as an opaque string to clients.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Profile {
+    pub normalized_email: String,
+    pub name: Option<String>,
+    pub picture: Option<String>,
+    pub updated_at: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default = "default_links_json")]
+    pub links_json: String,
+    #[serde(default, deserialize_with = "deserialize_d1_bool_opt")]
+    pub is_public: bool,
+    #[serde(default)]
+    pub profile_updated_at: Option<String>,
+}
+
+fn default_links_json() -> String {
+    "[]".to_string()
+}
+
+fn deserialize_d1_bool_opt<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // D1 sends booleans as SQLite integers (0/1); accept bool too.
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match v {
+        None | Some(serde_json::Value::Null) => Ok(false),
+        Some(serde_json::Value::Bool(b)) => Ok(b),
+        Some(serde_json::Value::Number(n)) => Ok(n.as_f64().unwrap_or(0.0) != 0.0),
+        Some(other) => Err(de::Error::custom(format!("invalid boolean value: {other}"))),
+    }
+}
+
+impl Profile {
+    /// Parsed typed links; corrupt JSON degrades to an empty list.
+    pub fn links(&self) -> Vec<crate::validation::profile::ProfileLink> {
+        crate::validation::profile::parse_links_json(&self.links_json)
+    }
+}
+
+pub struct ProfileRepository;
+
+impl ProfileRepository {
+    /// Upsert a user profile snapshot into the profiles table.
+    pub async fn upsert_profile(
+        db: &D1Database,
+        normalized_email: &str,
+        name: Option<&str>,
+        picture: Option<&str>,
+    ) -> WorkerResult<()> {
+        let sql = r#"
+            INSERT INTO profiles (normalized_email, name, picture, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT(normalized_email) DO UPDATE SET
+                name = COALESCE(excluded.name, profiles.name),
+                picture = COALESCE(excluded.picture, profiles.picture),
+                updated_at = datetime('now')
+        "#;
+
+        let email_val = JsValue::from_str(normalized_email);
+        let name_val = match name {
+            Some(n) if !n.trim().is_empty() => JsValue::from_str(n),
+            _ => JsValue::null(),
+        };
+        let picture_val = match picture {
+            Some(p) if !p.trim().is_empty() => JsValue::from_str(p),
+            _ => JsValue::null(),
+        };
+
+        db.prepare(sql)
+            .bind(&[email_val, name_val, picture_val])?
+            .run()
+            .await?;
+
+        Ok(())
+    }
+
+    /// Get a single profile row by normalized email.
+    pub async fn get_profile_by_email(
+        db: &D1Database,
+        normalized_email: &str,
+    ) -> WorkerResult<Option<Profile>> {
+        let sql = "SELECT normalized_email, name, picture, updated_at, display_name, title, links_json, is_public, profile_updated_at FROM profiles WHERE normalized_email = ?";
+        db.prepare(sql)
+            .bind(&[JsValue::from_str(normalized_email)])?
+            .first::<Profile>(None)
+            .await
+    }
+
+    /// Replace the user-owned editable fields atomically.
+    ///
+    /// Upsert keyed on the verified token email. Google-owned `name`/`picture`
+    /// are only set on insert (first sight); the conflict branch never touches
+    /// them, and it also never resets `profile_updated_at` semantics: only this
+    /// method (an intentional edit) updates that timestamp.
+    pub async fn update_profile_details(
+        db: &D1Database,
+        normalized_email: &str,
+        display_name: Option<&str>,
+        title: Option<&str>,
+        links_json: &str,
+        is_public: bool,
+    ) -> WorkerResult<()> {
+        let sql = r#"
+            INSERT INTO profiles (
+                normalized_email, name, picture, updated_at,
+                display_name, title, links_json, is_public, profile_updated_at
+            ) VALUES (?, NULL, NULL, datetime('now'), ?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(normalized_email) DO UPDATE SET
+                display_name = excluded.display_name,
+                title = excluded.title,
+                links_json = excluded.links_json,
+                is_public = excluded.is_public,
+                profile_updated_at = datetime('now')
+        "#;
+
+        db.prepare(sql)
+            .bind(&[
+                JsValue::from_str(normalized_email),
+                match display_name {
+                    Some(v) => JsValue::from_str(v),
+                    None => JsValue::null(),
+                },
+                match title {
+                    Some(v) => JsValue::from_str(v),
+                    None => JsValue::null(),
+                },
+                JsValue::from_str(links_json),
+                JsValue::from_bool(is_public),
+            ])?
+            .run()
+            .await?;
+
+        Ok(())
+    }
+
+    /// Look up published profiles by a list of normalized emails.
+    /// Only `is_public = 1` rows are returned; passively-created Google
+    /// snapshots never leak through public lookup.
+    pub async fn lookup_profiles(
+        db: &D1Database,
+        normalized_emails: &[String],
+    ) -> WorkerResult<Vec<Profile>> {
+        if normalized_emails.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = vec!["?"; normalized_emails.len()].join(", ");
+        let sql = [
+            "SELECT normalized_email, name, picture, updated_at, display_name, title, ",
+            "links_json, is_public, profile_updated_at FROM profiles ",
+            "WHERE is_public = 1 AND normalized_email IN ",
+            "(",
+            &placeholders,
+            ")",
+        ]
+        .concat();
+
+        let bind_values: Vec<JsValue> = normalized_emails
+            .iter()
+            .map(|e| JsValue::from_str(e))
+            .collect();
+
+        let result = db.prepare(&sql).bind(&bind_values)?.all().await?;
+
+        result.results::<Profile>()
+    }
+}

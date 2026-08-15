@@ -10,7 +10,8 @@ use crate::pretix::orders::UserPretixOrdersResponse;
 /// GET /api/pretix/me/orders — sanitized order history for the signed-in user.
 pub async fn handle_my_pretix_orders(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-    let user = require_user(&req, &config).await?;
+    let db = ctx.d1("DB").ok();
+    let user = require_user(&req, &config, db.as_ref()).await?;
 
     if config.pretix_default_organizer.trim().is_empty() {
         return Err(

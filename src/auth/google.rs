@@ -1,11 +1,12 @@
 use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use serde::Deserialize;
-use worker::{Fetch, Headers, Method, Request, RequestInit};
+use worker::{D1Database, Fetch, Headers, Method, Request, RequestInit};
 
 use super::AuthUser;
 use crate::config::AppConfig;
 use crate::http::errors::AppError;
+use crate::storage::d1::ProfileRepository;
 
 const GOOGLE_JWKS_URL: &str = "https://www.googleapis.com/oauth2/v3/certs";
 
@@ -18,8 +19,31 @@ struct GoogleClaims {
     picture: Option<String>,
 }
 
-/// Extract and validate authenticated user from the request.
-pub async fn extract_user(req: &Request, config: &AppConfig) -> Result<AuthUser, AppError> {
+/// Save user profile snapshot to D1 database.
+pub async fn save_profile_snapshot(db: &D1Database, user: &AuthUser) {
+    let _ = ProfileRepository::upsert_profile(
+        db,
+        &user.normalized_email(),
+        user.name.as_deref(),
+        user.picture.as_deref(),
+    )
+    .await;
+}
+
+/// Extract and validate authenticated user from the request, saving profile snapshot if DB is provided.
+pub async fn extract_user(
+    req: &Request,
+    config: &AppConfig,
+    db: Option<&D1Database>,
+) -> Result<AuthUser, AppError> {
+    let user = extract_user_inner(req, config).await?;
+    if let Some(db) = db {
+        save_profile_snapshot(db, &user).await;
+    }
+    Ok(user)
+}
+
+async fn extract_user_inner(req: &Request, config: &AppConfig) -> Result<AuthUser, AppError> {
     let headers = req.headers();
 
     if config.enable_debug_auth {

@@ -215,6 +215,24 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             cors_preflight(&config.allowed_origins)
         })
         // ---------------------------------------------------------------
+        // POST /api/profiles/lookup — batch profile lookup by email (public)
+        // ---------------------------------------------------------------
+        .post_async("/api/profiles/lookup", |req, ctx| async move {
+            crate::http::profiles::handle_profiles_lookup(req, ctx).await
+        })
+        // ---------------------------------------------------------------
+        // GET /api/profiles/me — the caller's own profile (authenticated)
+        // ---------------------------------------------------------------
+        .get_async("/api/profiles/me", |req, ctx| async move {
+            crate::http::profiles::handle_profiles_me_get(req, ctx).await
+        })
+        // ---------------------------------------------------------------
+        // PUT /api/profiles/me — replace the caller's editable profile (authenticated)
+        // ---------------------------------------------------------------
+        .put_async("/api/profiles/me", |req, ctx| async move {
+            crate::http::profiles::handle_profiles_me_put(req, ctx).await
+        })
+        // ---------------------------------------------------------------
         // GET /api/forms — list all active forms (optionally filter by ?kind=)
         // ---------------------------------------------------------------
         .get_async("/api/forms", |req, ctx| async move {
@@ -223,6 +241,7 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             let db = ctx
                 .d1("DB")
                 .map_err(|e| AppError::Internal(e.to_string()))?;
+            let authed = extract_user(&req, &config, Some(&db)).await.is_ok();
             let repo = FormRepository::new(db);
 
             let kind = req.url().ok().and_then(|url| {
@@ -231,7 +250,6 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                     .map(|(_, v)| v.to_string())
             });
 
-            let authed = extract_user(&req, &config).await.is_ok();
             let resp = if authed {
                 let forms = service::list_forms_authed(&repo, kind.as_deref()).await?;
                 json_success(&forms)?
@@ -250,13 +268,13 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             let db = ctx
                 .d1("DB")
                 .map_err(|e| AppError::Internal(e.to_string()))?;
+            let authed = extract_user(&req, &config, Some(&db)).await.is_ok();
             let repo = FormRepository::new(db);
 
             let kind = ctx
                 .param("kind")
                 .ok_or_else(|| AppError::BadRequest("Missing path parameter: kind".to_string()))?;
 
-            let authed = extract_user(&req, &config).await.is_ok();
             let resp = if authed {
                 let forms = service::list_forms_authed(&repo, Some(kind.as_str())).await?;
                 json_success(&forms)?
@@ -275,6 +293,7 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             let db = ctx
                 .d1("DB")
                 .map_err(|e| AppError::Internal(e.to_string()))?;
+            let authed = extract_user(&req, &config, Some(&db)).await.is_ok();
             let repo = FormRepository::new(db);
 
             let kind = ctx
@@ -284,7 +303,6 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                 .param("slug")
                 .ok_or_else(|| AppError::BadRequest("Missing path parameter: slug".to_string()))?;
 
-            let authed = extract_user(&req, &config).await.is_ok();
             let resp = if authed {
                 let form_status = service::get_form_status_authed(&repo, kind, slug).await?;
                 json_success(&form_status)?
@@ -366,11 +384,10 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
         .get_async("/api/applications/summary", |req, ctx| async move {
             let config =
                 AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-            let user = extract_user(&req, &config).await?;
-
             let db = ctx
                 .d1("DB")
                 .map_err(|e| AppError::Internal(e.to_string()))?;
+            let user = extract_user(&req, &config, Some(&db)).await?;
             let repo = FormRepository::new(db);
             let client = FormbricksClient::new(&config);
 
@@ -386,11 +403,10 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             |req, ctx| async move {
                 let config =
                     AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-                let user = extract_user(&req, &config).await?;
-
                 let db = ctx
                     .d1("DB")
                     .map_err(|e| AppError::Internal(e.to_string()))?;
+                let user = extract_user(&req, &config, Some(&db)).await?;
                 let repo = FormRepository::new(db);
                 let client = FormbricksClient::new(&config);
 
@@ -412,11 +428,10 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
         .get_async("/api/applications/:kind/:slug", |req, ctx| async move {
             let config =
                 AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-            let user = extract_user(&req, &config).await?;
-
             let db = ctx
                 .d1("DB")
                 .map_err(|e| AppError::Internal(e.to_string()))?;
+            let user = extract_user(&req, &config, Some(&db)).await?;
             let repo = FormRepository::new(db);
             let _client = FormbricksClient::new(&config);
 
@@ -448,11 +463,10 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             |mut req, ctx| async move {
                 let config =
                     AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-                let user = extract_user(&req, &config).await?;
-
                 let db = ctx
                     .d1("DB")
                     .map_err(|e| AppError::Internal(e.to_string()))?;
+                let user = extract_user(&req, &config, Some(&db)).await?;
                 let repo = FormRepository::new(db);
                 let _client = FormbricksClient::new(&config);
 
@@ -493,11 +507,10 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             |req, ctx| async move {
                 let config =
                     AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-                let user = extract_user(&req, &config).await?;
-
                 let db = ctx
                     .d1("DB")
                     .map_err(|e| AppError::Internal(e.to_string()))?;
+                let user = extract_user(&req, &config, Some(&db)).await?;
                 let repo = FormRepository::new(db);
 
                 let kind = ctx.param("kind").ok_or_else(|| {

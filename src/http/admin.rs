@@ -21,7 +21,8 @@ struct AdminMe {
 /// GET /api/admin/me — identity of the authenticated admin.
 pub async fn handle_admin_me(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-    let user = require_admin(&req, &config).await?;
+    let db_opt = ctx.d1("DB").ok();
+    let user = require_admin(&req, &config, db_opt.as_ref()).await?;
     let origin = req.headers().get("Origin").ok().flatten();
     let body = AdminMe {
         email: user.email,
@@ -47,7 +48,8 @@ struct AdminFormSummary {
 /// GET /api/admin/forms — list all active application_forms (all kinds).
 pub async fn handle_admin_forms(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-    require_admin(&req, &config).await?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
     let origin = req.headers().get("Origin").ok().flatten();
 
     let db = ctx
@@ -100,7 +102,8 @@ struct AdminFormbricksResponseList {
 /// GET /api/admin/formbricks/responses?surveyId=...&limit=50&offset=0&finished=all|true|false
 pub async fn handle_admin_responses(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-    require_admin(&req, &config).await?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
     let origin = req.headers().get("Origin").ok().flatten();
 
     let (survey_id, limit, offset, finished_filter) = parse_list_query(&req)?;
@@ -169,7 +172,8 @@ struct AdminFormbricksResponseDetail {
 /// GET /api/admin/formbricks/responses/:responseId?surveyId=...
 pub async fn handle_admin_response_detail(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-    require_admin(&req, &config).await?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
     let origin = req.headers().get("Origin").ok().flatten();
 
     let response_id = ctx

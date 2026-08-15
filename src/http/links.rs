@@ -63,7 +63,8 @@ pub async fn handle_public_links(req: Request, ctx: RouteContext<()>) -> Result<
 /// GET /api/admin/links — admin view of all items.
 pub async fn handle_admin_links(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-    require_admin(&req, &config).await?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
     let origin = req.headers().get("Origin").ok().flatten();
 
     let db = ctx
@@ -91,7 +92,8 @@ pub async fn handle_admin_links(req: Request, ctx: RouteContext<()>) -> Result<R
 /// PUT /api/admin/links/page — update singleton page profile.
 pub async fn handle_admin_update_page(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-    require_admin(&req, &config).await?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
     let origin = req.headers().get("Origin").ok().flatten();
 
     let bytes = req.bytes().await?;
@@ -115,7 +117,8 @@ pub async fn handle_admin_update_page(mut req: Request, ctx: RouteContext<()>) -
 /// POST /api/admin/links/items — create a link.
 pub async fn handle_admin_create_link(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-    require_admin(&req, &config).await?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
     let origin = req.headers().get("Origin").ok().flatten();
 
     let bytes = req.bytes().await?;
@@ -139,7 +142,8 @@ pub async fn handle_admin_create_link(mut req: Request, ctx: RouteContext<()>) -
 /// PUT /api/admin/links/items/:linkId — update a link.
 pub async fn handle_admin_update_link(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-    require_admin(&req, &config).await?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
     let origin = req.headers().get("Origin").ok().flatten();
 
     let id = ctx
@@ -168,7 +172,8 @@ pub async fn handle_admin_update_link(mut req: Request, ctx: RouteContext<()>) -
 /// DELETE /api/admin/links/items/:linkId — delete a link (204 No Content).
 pub async fn handle_admin_delete_link(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-    require_admin(&req, &config).await?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
     let _origin = req.headers().get("Origin").ok().flatten();
 
     let id = ctx
@@ -195,7 +200,8 @@ pub async fn handle_admin_delete_link(req: Request, ctx: RouteContext<()>) -> Re
 /// PUT /api/admin/links/order — reassign display_order based on id sequence.
 pub async fn handle_admin_reorder(mut req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
-    require_admin(&req, &config).await?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
     let origin = req.headers().get("Origin").ok().flatten();
 
     let bytes = req.bytes().await?;
