@@ -233,6 +233,18 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             crate::http::profiles::handle_profiles_me_put(req, ctx).await
         })
         // ---------------------------------------------------------------
+        // POST /api/profiles/me/avatar — upload avatar image to Cloudflare R2 (authenticated)
+        // ---------------------------------------------------------------
+        .post_async("/api/profiles/me/avatar", |req, ctx| async move {
+            crate::http::avatars::handle_profiles_me_avatar_post(req, ctx).await
+        })
+        // ---------------------------------------------------------------
+        // DELETE /api/profiles/me/avatar — reset avatar image (authenticated)
+        // ---------------------------------------------------------------
+        .delete_async("/api/profiles/me/avatar", |req, ctx| async move {
+            crate::http::avatars::handle_profiles_me_avatar_delete(req, ctx).await
+        })
+        // ---------------------------------------------------------------
         // GET /api/forms — list all active forms (optionally filter by ?kind=)
         // ---------------------------------------------------------------
         .get_async("/api/forms", |req, ctx| async move {

@@ -13,6 +13,8 @@
 | `GET` | `/api/forms/:kind` | List active forms for a kind | Same as above, filtered |
 | `GET` | `/api/forms/:kind/:slug` | Get single form with policy status | `{ form: FormInfo, status: "open" \| "closed" \| "not_yet_open" \| "archived" }` |
 
+| `POST` | `/api/profiles/lookup` | Public bulk lookup of public profiles by username | `{ usernames: string[] }` | `{ profiles: { [username]: PublicProfile } }` (only `is_public=1`) |
+
 ### Auth-Required (Google Auth — Bearer token or X-Debug-User-Email for dev)
 
 | Method | Path | Purpose | Request Body | Response |
@@ -20,6 +22,8 @@
 | `GET` | `/api/applications/:kind/:slug` | Discover user's existing application | — | `{ exists, response_id?, finished?, submitted_email?, linkedin_url?, editable }` |
 | `POST` | `/api/applications/:kind/:slug/validate` | Validate before submit / check duplicate LinkedIn | `{ linkedin_url: "..." }` | `{ ok, code?, message? }` e.g. `{ ok: false, code: "duplicate_linkedin", message: "..." }` |
 | `POST` | `/api/applications/:kind/:slug/link` | Get FormBricks form link (only if open/editable) | — | `{ url: "...", editable: bool }` |
+| `GET` | `/api/profiles/me` | Get self-service profile | — | Profile JSON with `username`, `display_name`, `title`, `links`, etc. |
+| `PUT` | `/api/profiles/me` | Update self-service profile | `{ username, display_name, title, links, is_public }` | `200 OK` or `400`/`409 Conflict` |
 
 ## Auth Headers
 

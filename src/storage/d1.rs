@@ -301,6 +301,8 @@ pub struct Profile {
     pub is_public: bool,
     #[serde(default)]
     pub profile_updated_at: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
 }
 
 fn default_links_json() -> String {
@@ -342,8 +344,8 @@ impl ProfileRepository {
             INSERT INTO profiles (normalized_email, name, picture, updated_at)
             VALUES (?, ?, ?, datetime('now'))
             ON CONFLICT(normalized_email) DO UPDATE SET
-                name = COALESCE(excluded.name, profiles.name),
-                picture = COALESCE(excluded.picture, profiles.picture),
+                name = COALESCE(profiles.name, excluded.name),
+                picture = COALESCE(profiles.picture, excluded.picture),
                 updated_at = datetime('now')
         "#;
 
@@ -365,14 +367,54 @@ impl ProfileRepository {
         Ok(())
     }
 
+    /// Update or initialize profile picture for this user email.
+    pub async fn update_picture(
+        db: &D1Database,
+        normalized_email: &str,
+        picture: Option<&str>,
+    ) -> WorkerResult<()> {
+        let sql = r#"
+            INSERT INTO profiles (normalized_email, name, picture, updated_at)
+            VALUES (?, NULL, ?, datetime('now'))
+            ON CONFLICT(normalized_email) DO UPDATE SET
+                picture = excluded.picture,
+                updated_at = datetime('now')
+        "#;
+
+        let email_val = JsValue::from_str(normalized_email);
+        let picture_val = match picture {
+            Some(p) if !p.trim().is_empty() => JsValue::from_str(p),
+            _ => JsValue::null(),
+        };
+
+        db.prepare(sql)
+            .bind(&[email_val, picture_val])?
+            .run()
+            .await?;
+
+        Ok(())
+    }
+
     /// Get a single profile row by normalized email.
     pub async fn get_profile_by_email(
         db: &D1Database,
         normalized_email: &str,
     ) -> WorkerResult<Option<Profile>> {
-        let sql = "SELECT normalized_email, name, picture, updated_at, display_name, title, links_json, is_public, profile_updated_at FROM profiles WHERE normalized_email = ?";
+        let sql = "SELECT normalized_email, name, picture, updated_at, display_name, title, links_json, is_public, profile_updated_at, username FROM profiles WHERE normalized_email = ?";
         db.prepare(sql)
             .bind(&[JsValue::from_str(normalized_email)])?
+            .first::<Profile>(None)
+            .await
+    }
+
+    /// Get a single profile row by username.
+    pub async fn get_profile_by_username(
+        db: &D1Database,
+        username: &str,
+    ) -> WorkerResult<Option<Profile>> {
+        let sql = "SELECT normalized_email, name, picture, updated_at, display_name, title, links_json, is_public, profile_updated_at, username FROM profiles WHERE username = ?";
+        db.prepare(sql)
+            .bind(&[JsValue::from_str(username)])?
             .first::<Profile>(None)
             .await
     }
@@ -390,18 +432,20 @@ impl ProfileRepository {
         title: Option<&str>,
         links_json: &str,
         is_public: bool,
+        username: Option<&str>,
     ) -> WorkerResult<()> {
         let sql = r#"
             INSERT INTO profiles (
                 normalized_email, name, picture, updated_at,
-                display_name, title, links_json, is_public, profile_updated_at
-            ) VALUES (?, NULL, NULL, datetime('now'), ?, ?, ?, ?, datetime('now'))
+                display_name, title, links_json, is_public, profile_updated_at, username
+            ) VALUES (?, NULL, NULL, datetime('now'), ?, ?, ?, ?, datetime('now'), ?)
             ON CONFLICT(normalized_email) DO UPDATE SET
                 display_name = excluded.display_name,
                 title = excluded.title,
                 links_json = excluded.links_json,
                 is_public = excluded.is_public,
-                profile_updated_at = datetime('now')
+                profile_updated_at = datetime('now'),
+                username = excluded.username
         "#;
 
         db.prepare(sql)
@@ -417,6 +461,10 @@ impl ProfileRepository {
                 },
                 JsValue::from_str(links_json),
                 JsValue::from_bool(is_public),
+                match username {
+                    Some(u) => JsValue::from_str(u),
+                    None => JsValue::null(),
+                },
             ])?
             .run()
             .await?;
@@ -438,7 +486,7 @@ impl ProfileRepository {
         let placeholders = vec!["?"; normalized_emails.len()].join(", ");
         let sql = [
             "SELECT normalized_email, name, picture, updated_at, display_name, title, ",
-            "links_json, is_public, profile_updated_at FROM profiles ",
+            "links_json, is_public, profile_updated_at, username FROM profiles ",
             "WHERE is_public = 1 AND normalized_email IN ",
             "(",
             &placeholders,
@@ -453,6 +501,78 @@ impl ProfileRepository {
 
         let result = db.prepare(&sql).bind(&bind_values)?.all().await?;
 
+        result.results::<Profile>()
+    }
+
+    /// Look up published profiles by a list of usernames.
+    /// Only `is_public = 1` rows are returned.
+    pub async fn lookup_profiles_by_usernames(
+        db: &D1Database,
+        usernames: &[String],
+    ) -> WorkerResult<Vec<Profile>> {
+        if usernames.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders = vec!["?"; usernames.len()].join(", ");
+        let sql = [
+            "SELECT normalized_email, name, picture, updated_at, display_name, title, ",
+            "links_json, is_public, profile_updated_at, username FROM profiles ",
+            "WHERE is_public = 1 AND username IN ",
+            "(",
+            &placeholders,
+            ")",
+        ]
+        .concat();
+
+        let bind_values: Vec<JsValue> = usernames
+            .iter()
+            .map(|u| JsValue::from_str(u))
+            .collect();
+
+        let result = db.prepare(&sql).bind(&bind_values)?.all().await?;
+
+        result.results::<Profile>()
+    }
+
+    /// Look up published profiles by emails and/or usernames.
+    /// Only `is_public = 1` rows are returned.
+    pub async fn lookup_profiles_by_identifiers(
+        db: &D1Database,
+        emails: &[String],
+        usernames: &[String],
+    ) -> WorkerResult<Vec<Profile>> {
+        if emails.is_empty() && usernames.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        if usernames.is_empty() {
+            return Self::lookup_profiles(db, emails).await;
+        }
+
+        if emails.is_empty() {
+            return Self::lookup_profiles_by_usernames(db, usernames).await;
+        }
+
+        let email_placeholders = vec!["?"; emails.len()].join(", ");
+        let username_placeholders = vec!["?"; usernames.len()].join(", ");
+
+        let sql = format!(
+            "SELECT normalized_email, name, picture, updated_at, display_name, title, \
+             links_json, is_public, profile_updated_at, username FROM profiles \
+             WHERE is_public = 1 AND (normalized_email IN ({}) OR username IN ({}))",
+            email_placeholders, username_placeholders
+        );
+
+        let mut bind_values = Vec::with_capacity(emails.len() + usernames.len());
+        for e in emails {
+            bind_values.push(JsValue::from_str(e));
+        }
+        for u in usernames {
+            bind_values.push(JsValue::from_str(u));
+        }
+
+        let result = db.prepare(&sql).bind(&bind_values)?.all().await?;
         result.results::<Profile>()
     }
 }

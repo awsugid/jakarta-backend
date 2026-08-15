@@ -1,4 +1,5 @@
 pub mod admin;
+pub mod avatars;
 pub mod errors;
 pub mod links;
 pub mod profiles;

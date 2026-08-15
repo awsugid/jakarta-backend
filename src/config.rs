@@ -13,6 +13,7 @@ pub struct AppConfig {
     pub enable_debug_auth: bool,
     pub admin_emails: Vec<String>,
     pub company_exclusion_keywords: Vec<String>,
+    pub avatar_public_base_url: String,
 }
 
 impl AppConfig {
@@ -49,6 +50,10 @@ impl AppConfig {
             .var("COMPANY_EXCLUSION_KEYWORDS")
             .map(|v| parse_keywords(&v.to_string()))
             .unwrap_or_else(|_| default_company_exclusion_keywords());
+        let avatar_public_base_url = env
+            .var("AVATAR_PUBLIC_BASE_URL")
+            .map(|v| v.to_string())
+            .unwrap_or_else(|_| "https://avatars.awscommunity.id".to_string());
         Ok(Self {
             formbricks_base_url,
             formbricks_api_key,
@@ -61,6 +66,7 @@ impl AppConfig {
             enable_debug_auth,
             admin_emails,
             company_exclusion_keywords,
+            avatar_public_base_url,
         })
     }
 

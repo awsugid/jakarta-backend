@@ -9,6 +9,7 @@ pub enum AppError {
     Unauthorized(String),
     Forbidden(String),
     NotFound(String),
+    Conflict(String),
     Internal(String),
     FormBricksError(String),
 }
@@ -20,6 +21,7 @@ impl AppError {
             AppError::Unauthorized(_) => 401,
             AppError::Forbidden(_) => 403,
             AppError::NotFound(_) => 404,
+            AppError::Conflict(_) => 409,
             AppError::Internal(_) => 500,
             AppError::FormBricksError(_) => 502,
         }
@@ -31,6 +33,7 @@ impl AppError {
             | AppError::Unauthorized(m)
             | AppError::Forbidden(m)
             | AppError::NotFound(m)
+            | AppError::Conflict(m)
             | AppError::Internal(m)
             | AppError::FormBricksError(m) => m,
         }
@@ -71,6 +74,7 @@ impl AppError {
             AppError::Unauthorized(_) => "Unauthorized",
             AppError::Forbidden(_) => "Forbidden",
             AppError::NotFound(_) => "Not Found",
+            AppError::Conflict(_) => "Conflict",
             AppError::Internal(_) => "Internal Server Error",
             AppError::FormBricksError(_) => "Bad Gateway",
         }

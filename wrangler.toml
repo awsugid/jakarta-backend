@@ -10,11 +10,16 @@ ALLOWED_ORIGINS = "*"
 GOOGLE_CLIENT_ID = "429454264649-uq35pi9hari5volodi876dtbqvuq30ld.apps.googleusercontent.com"
 ENABLE_DEBUG_AUTH = "false"
 PRETIX_DEFAULT_ORGANIZER = "AWSUserGroupJakarta"
+AVATAR_PUBLIC_BASE_URL = "https://avatars.awscommunity.id"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "jakarta-backend"
 database_id = "6df70f62-095b-47ab-bbb3-b502892758f5"
+
+[[r2_buckets]]
+binding = "AVATAR_BUCKET"
+bucket_name = "jakarta-bucket"
 
 [observability]
 enabled = false

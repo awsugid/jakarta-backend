@@ -6,6 +6,69 @@ pub const MAX_LINKS: usize = 8;
 pub const MAX_DISPLAY_NAME_LEN: usize = 80;
 pub const MAX_TITLE_LEN: usize = 100;
 pub const MAX_OTHER_LABEL_LEN: usize = 32;
+pub const MIN_USERNAME_LEN: usize = 3;
+pub const MAX_USERNAME_LEN: usize = 30;
+
+pub const RESERVED_USERNAMES: &[&str] = &[
+    "admin",
+    "administrator",
+    "api",
+    "app",
+    "auth",
+    "dashboard",
+    "help",
+    "login",
+    "logout",
+    "me",
+    "null",
+    "profile",
+    "profiles",
+    "root",
+    "settings",
+    "support",
+    "undefined",
+    "user",
+    "users",
+];
+
+/// Validates and normalizes an optional username.
+///
+/// Rules:
+/// - `None` or whitespace-only becomes `Ok(None)`
+/// - Length must be between 3 and 30 characters
+/// - Characters allowed: `[a-z0-9_-]`
+/// - Normalized to lowercase
+/// - Rejects reserved words (e.g. "admin", "api", "profile", "null", "undefined")
+pub fn validate_username(username: Option<&str>) -> Result<Option<String>, &'static str> {
+    let raw = match username {
+        None => return Ok(None),
+        Some(s) => s.trim(),
+    };
+    if raw.is_empty() {
+        return Ok(None);
+    }
+
+    let lower = raw.to_lowercase();
+    let char_count = lower.chars().count();
+    if char_count < MIN_USERNAME_LEN {
+        return Err("username must be at least 3 characters");
+    }
+    if char_count > MAX_USERNAME_LEN {
+        return Err("username must be <= 30 characters");
+    }
+
+    for c in lower.chars() {
+        if !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '_' && c != '-' {
+            return Err("username may only contain lowercase letters, numbers, underscores, and hyphens");
+        }
+    }
+
+    if RESERVED_USERNAMES.contains(&lower.as_str()) {
+        return Err("username is reserved");
+    }
+
+    Ok(Some(lower))
+}
 
 /// A user-editable profile link. `label` is required for kind `other`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,4 +369,72 @@ mod tests {
     fn corrupt_links_json_degrades_to_empty() {
         assert!(parse_links_json("not json [").is_empty());
     }
+
+    #[test]
+    fn validate_username_none_and_empty() {
+        assert_eq!(validate_username(None), Ok(None));
+        assert_eq!(validate_username(Some("")), Ok(None));
+        assert_eq!(validate_username(Some("   ")), Ok(None));
+    }
+
+    #[test]
+    fn validate_username_valid_formats() {
+        assert_eq!(
+            validate_username(Some("avei")),
+            Ok(Some("avei".to_string()))
+        );
+        assert_eq!(
+            validate_username(Some("Avei_123")),
+            Ok(Some("avei_123".to_string()))
+        );
+        assert_eq!(
+            validate_username(Some("  user-name_99  ")),
+            Ok(Some("user-name_99".to_string()))
+        );
+        assert_eq!(
+            validate_username(Some("abc")),
+            Ok(Some("abc".to_string()))
+        );
+        let max_len_username = "a".repeat(30);
+        assert_eq!(
+            validate_username(Some(&max_len_username)),
+            Ok(Some(max_len_username))
+        );
+    }
+
+    #[test]
+    fn validate_username_too_short() {
+        assert!(validate_username(Some("a")).is_err());
+        assert!(validate_username(Some("ab")).is_err());
+        assert!(validate_username(Some("  ab  ")).is_err());
+    }
+
+    #[test]
+    fn validate_username_too_long() {
+        let too_long = "a".repeat(31);
+        assert!(validate_username(Some(&too_long)).is_err());
+    }
+
+    #[test]
+    fn validate_username_invalid_characters() {
+        assert!(validate_username(Some("user name")).is_err());
+        assert!(validate_username(Some("user@name")).is_err());
+        assert!(validate_username(Some("user.name")).is_err());
+        assert!(validate_username(Some("user#123")).is_err());
+        assert!(validate_username(Some("user!name")).is_err());
+        assert!(validate_username(Some("user$")).is_err());
+        assert!(validate_username(Some("user/name")).is_err());
+    }
+
+    #[test]
+    fn validate_username_rejects_reserved_words() {
+        let reserved = ["admin", "api", "profile", "profiles", "null", "undefined", "ADMIN", "Api", "Me", "root", "auth"];
+        for word in reserved {
+            assert!(
+                validate_username(Some(word)).is_err(),
+                "expected '{word}' to be rejected as reserved"
+            );
+        }
+    }
 }
+
