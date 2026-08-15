@@ -59,7 +59,9 @@ pub fn validate_username(username: Option<&str>) -> Result<Option<String>, &'sta
 
     for c in lower.chars() {
         if !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '_' && c != '-' {
-            return Err("username may only contain lowercase letters, numbers, underscores, and hyphens");
+            return Err(
+                "username may only contain lowercase letters, numbers, underscores, and hyphens",
+            );
         }
     }
 
@@ -391,10 +393,7 @@ mod tests {
             validate_username(Some("  user-name_99  ")),
             Ok(Some("user-name_99".to_string()))
         );
-        assert_eq!(
-            validate_username(Some("abc")),
-            Ok(Some("abc".to_string()))
-        );
+        assert_eq!(validate_username(Some("abc")), Ok(Some("abc".to_string())));
         let max_len_username = "a".repeat(30);
         assert_eq!(
             validate_username(Some(&max_len_username)),
@@ -428,7 +427,19 @@ mod tests {
 
     #[test]
     fn validate_username_rejects_reserved_words() {
-        let reserved = ["admin", "api", "profile", "profiles", "null", "undefined", "ADMIN", "Api", "Me", "root", "auth"];
+        let reserved = [
+            "admin",
+            "api",
+            "profile",
+            "profiles",
+            "null",
+            "undefined",
+            "ADMIN",
+            "Api",
+            "Me",
+            "root",
+            "auth",
+        ];
         for word in reserved {
             assert!(
                 validate_username(Some(word)).is_err(),
@@ -437,4 +448,3 @@ mod tests {
         }
     }
 }
-

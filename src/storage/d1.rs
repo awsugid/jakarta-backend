@@ -525,10 +525,7 @@ impl ProfileRepository {
         ]
         .concat();
 
-        let bind_values: Vec<JsValue> = usernames
-            .iter()
-            .map(|u| JsValue::from_str(u))
-            .collect();
+        let bind_values: Vec<JsValue> = usernames.iter().map(|u| JsValue::from_str(u)).collect();
 
         let result = db.prepare(&sql).bind(&bind_values)?.all().await?;
 

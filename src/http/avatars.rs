@@ -97,11 +97,17 @@ pub async fn handle_profiles_me_avatar_post(
         .execute()
         .await?;
 
-    let public_url = format!("{}/{}", config.avatar_public_base_url.trim_end_matches('/'), key);
+    let public_url = format!(
+        "{}/{}",
+        config.avatar_public_base_url.trim_end_matches('/'),
+        key
+    );
 
     ProfileRepository::update_picture(&db, &email, Some(&public_url))
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to update profile picture in database: {e}")))?;
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to update profile picture in database: {e}"))
+        })?;
 
     let my = match ProfileRepository::get_profile_by_email(&db, &email).await {
         Ok(Some(row)) => MyProfile::from_row(email, &row),
@@ -128,7 +134,9 @@ pub async fn handle_profiles_me_avatar_delete(
 
     ProfileRepository::update_picture(&db, &email, user.picture.as_deref())
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to reset profile picture in database: {e}")))?;
+        .map_err(|e| {
+            AppError::Internal(format!("Failed to reset profile picture in database: {e}"))
+        })?;
 
     let my = match ProfileRepository::get_profile_by_email(&db, &email).await {
         Ok(Some(row)) => MyProfile::from_row(email, &row),

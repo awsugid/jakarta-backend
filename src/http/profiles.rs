@@ -211,13 +211,11 @@ pub async fn handle_profiles_lookup(mut req: Request, ctx: RouteContext<()>) -> 
 
     let req_body: ProfilesLookupRequest = match req.json().await {
         Ok(body) => body,
-        Err(_) => {
-            return Err(AppError::BadRequest(
-                "Invalid JSON body. Expected { \"usernames\": string[] } or { \"emails\": string[] }."
-                    .to_string(),
-            )
-            .into())
-        }
+        Err(_) => return Err(AppError::BadRequest(
+            "Invalid JSON body. Expected { \"usernames\": string[] } or { \"emails\": string[] }."
+                .to_string(),
+        )
+        .into()),
     };
 
     if req_body.emails.len() + req_body.usernames.len() > 50 {
@@ -330,7 +328,8 @@ mod tests {
 
     #[test]
     fn update_request_allows_omitted_username() {
-        let raw = r#"{ "displayName": "Avei", "title": "Engineer", "links": [], "isPublic": false }"#;
+        let raw =
+            r#"{ "displayName": "Avei", "title": "Engineer", "links": [], "isPublic": false }"#;
         let parsed: ProfileUpdateRequest = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed.username, None);
     }
@@ -353,4 +352,3 @@ mod tests {
         assert_eq!(parsed_usernames.usernames, vec!["avei"]);
     }
 }
-
