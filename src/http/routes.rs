@@ -207,6 +207,45 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             crate::http::links::handle_admin_reorder(req, ctx).await
         })
         // ---------------------------------------------------------------
+        // GET /api/events/:eventSlug/sponsor-packages — sponsor packages (public)
+        // ---------------------------------------------------------------
+        .get_async(
+            "/api/events/:eventSlug/sponsor-packages",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_public_sponsor_packages(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
+        // PUT /api/admin/events/:eventSlug/sponsor-packages — batch price/unlock
+        // update (admin-only, origin-reflected CORS)
+        // ---------------------------------------------------------------
+        .put_async(
+            "/api/admin/events/:eventSlug/sponsor-packages",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_update_sponsor_packages(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
+        // POST /api/admin/events/:eventSlug/sponsor-packages — create a
+        // sponsor package (admin-only, origin-reflected CORS)
+        // ---------------------------------------------------------------
+        .post_async(
+            "/api/admin/events/:eventSlug/sponsor-packages",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_create_sponsor_package(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
+        // POST /api/admin/events/:eventSlug/sponsor-groups — create sponsor
+        // package group (admin-only, origin-reflected CORS)
+        // ---------------------------------------------------------------
+        .post_async(
+            "/api/admin/events/:eventSlug/sponsor-groups",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_create_sponsor_group(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
         // CORS preflight for all /api/* routes
         // ---------------------------------------------------------------
         .options("/api/*rest", |_req, ctx| {
