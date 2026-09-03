@@ -246,6 +246,26 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             },
         )
         // ---------------------------------------------------------------
+        // DELETE /api/admin/events/:eventSlug/sponsor-packages/:packageId —
+        // delete a sponsor package (admin-only, origin-reflected CORS)
+        // ---------------------------------------------------------------
+        .delete_async(
+            "/api/admin/events/:eventSlug/sponsor-packages/:packageId",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_delete_sponsor_package(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
+        // DELETE /api/admin/events/:eventSlug/sponsor-groups/:groupId —
+        // delete a sponsor package group (admin-only, origin-reflected CORS)
+        // ---------------------------------------------------------------
+        .delete_async(
+            "/api/admin/events/:eventSlug/sponsor-groups/:groupId",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_delete_sponsor_group(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
         // CORS preflight for all /api/* routes
         // ---------------------------------------------------------------
         .options("/api/*rest", |_req, ctx| {

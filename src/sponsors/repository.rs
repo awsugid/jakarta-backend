@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 use wasm_bindgen::JsValue;
+use worker::d1::D1Result;
 use worker::{D1Database, Result as WorkerResult};
 
 use crate::sponsors::types::{
@@ -96,6 +97,40 @@ fn generate_unique_id(
     Err(worker::Error::RustError(format!(
         "could not generate an unused sponsor {fallback} id"
     )))
+}
+
+/// Failure modes of a package delete. `NotFound` means no row matched the
+/// (event_slug, id) pair, so nothing was mutated.
+#[derive(Debug)]
+pub enum DeletePackageError {
+    NotFound,
+    Db(worker::Error),
+}
+
+impl From<worker::Error> for DeletePackageError {
+    fn from(err: worker::Error) -> Self {
+        DeletePackageError::Db(err)
+    }
+}
+
+/// Failure modes of a group delete. `GroupInUse` is decided by the DELETE
+/// statement itself (NOT EXISTS guard), so a referenced group is never
+/// removed and packages can never be orphaned.
+#[derive(Debug)]
+pub enum DeleteGroupError {
+    NotFound,
+    GroupInUse,
+    Db(worker::Error),
+}
+
+impl From<worker::Error> for DeleteGroupError {
+    fn from(err: worker::Error) -> Self {
+        DeleteGroupError::Db(err)
+    }
+}
+
+fn changed_rows(result: &D1Result) -> WorkerResult<usize> {
+    Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0))
 }
 
 /// Failure modes of a batch update. `UnknownIds`, `UnknownGroupIds`, and
@@ -289,9 +324,10 @@ impl SponsorPackageRepository {
     /// Validate requested group and package ids against the fixed event sets,
     /// then apply all updates in one D1 batch and return the refreshed listing.
     ///
-    /// Membership cannot change through the application between this check and
-    /// the batch (no create/delete endpoint), so the check is sufficient to
-    /// reject unknown ids without partial updates.
+    /// Membership may change concurrently via the create/delete endpoints, so
+    /// unknown ids can still surface as a no-op UPDATE; the pre-checks keep
+    /// that window negligible and the UNIQUE(event_slug, display_order)
+    /// constraint backstops order collisions.
     ///
     /// Group display_order rewrites are two-phase: the UNIQUE(event_slug,
     /// display_order) constraint is immediate, so swaps would collide if done
@@ -418,6 +454,81 @@ impl SponsorPackageRepository {
             statements.push(stmt);
         }
         self.db.batch(statements).await?;
+
+        Ok((
+            self.list_groups(event_slug).await?,
+            self.list_packages(event_slug).await?,
+        ))
+    }
+
+    /// Delete a package for an event. Verifies the affected-row count so a
+    /// missing (or cross-event) id maps to `NotFound` instead of a silent
+    /// success. Returns the refreshed groups/packages listing.
+    pub async fn delete_package(
+        &self,
+        event_slug: &str,
+        package_id: &str,
+    ) -> Result<(Vec<SponsorPackageGroup>, Vec<SponsorPackage>), DeletePackageError> {
+        let result = self
+            .db
+            .prepare("DELETE FROM sponsor_packages WHERE event_slug = ? AND id = ?")
+            .bind(&[JsValue::from_str(event_slug), JsValue::from_str(package_id)])?
+            .run()
+            .await?;
+        if changed_rows(&result)? == 0 {
+            return Err(DeletePackageError::NotFound);
+        }
+
+        Ok((
+            self.list_groups(event_slug).await?,
+            self.list_packages(event_slug).await?,
+        ))
+    }
+
+    /// Delete a group only while no package still references it. The NOT
+    /// EXISTS guard lives inside the DELETE itself, so even a concurrent
+    /// package create cannot race past the check and end up orphaned. A zero
+    /// affected-row count is disambiguated afterwards: missing group vs group
+    /// still in use.
+    pub async fn delete_group(
+        &self,
+        event_slug: &str,
+        group_id: &str,
+    ) -> Result<(Vec<SponsorPackageGroup>, Vec<SponsorPackage>), DeleteGroupError> {
+        let result = self
+            .db
+            .prepare(
+                r#"
+                DELETE FROM sponsor_package_groups
+                WHERE event_slug = ? AND id = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM sponsor_packages
+                      WHERE event_slug = ? AND group_id = ?
+                  )
+            "#,
+            )
+            .bind(&[
+                JsValue::from_str(event_slug),
+                JsValue::from_str(group_id),
+                JsValue::from_str(event_slug),
+                JsValue::from_str(group_id),
+            ])?
+            .run()
+            .await?;
+        if changed_rows(&result)? == 0 {
+            let exists = self
+                .db
+                .prepare("SELECT id FROM sponsor_package_groups WHERE event_slug = ? AND id = ?")
+                .bind(&[JsValue::from_str(event_slug), JsValue::from_str(group_id)])?
+                .first::<IdRow>(None)
+                .await?
+                .is_some();
+            return Err(if exists {
+                DeleteGroupError::GroupInUse
+            } else {
+                DeleteGroupError::NotFound
+            });
+        }
 
         Ok((
             self.list_groups(event_slug).await?,

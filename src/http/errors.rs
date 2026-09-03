@@ -83,6 +83,35 @@ impl AppError {
 
 impl std::error::Error for AppError {}
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `main` in lib.rs recovers the HTTP status by prefix-matching this
+    /// Display form, so every variant's prefix must stay in sync with the
+    /// branches there. Conflict regressed to 500 once because of a gap.
+    #[test]
+    fn display_prefix_matches_status_code() {
+        let cases = [
+            AppError::BadRequest("m".to_string()),
+            AppError::Unauthorized("m".to_string()),
+            AppError::Forbidden("m".to_string()),
+            AppError::NotFound("m".to_string()),
+            AppError::Conflict("m".to_string()),
+            AppError::Internal("m".to_string()),
+            AppError::FormBricksError("m".to_string()),
+        ];
+        for err in cases {
+            let rendered = err.to_string();
+            let expected = format!("{} (", err.status_code());
+            assert!(
+                rendered.starts_with(&expected),
+                "{rendered:?} must start with {expected:?}"
+            );
+        }
+    }
+}
+
 impl From<worker::Error> for AppError {
     fn from(err: worker::Error) -> Self {
         AppError::Internal(err.to_string())

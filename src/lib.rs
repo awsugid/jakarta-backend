@@ -41,6 +41,8 @@ async fn main(req: Request, env: Env, _ctx: Context) -> worker::Result<Response>
                         (400, msg.as_str())
                     } else if msg.starts_with("404 (") {
                         (404, msg.as_str())
+                    } else if msg.starts_with("409 (") {
+                        (409, msg.as_str())
                     } else if msg.starts_with("502 (") {
                         (502, msg.as_str())
                     } else {

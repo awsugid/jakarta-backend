@@ -7,8 +7,8 @@ use crate::config::AppConfig;
 use crate::http::errors::AppError;
 use crate::http::response::{json_success, json_success_cors, with_cors};
 use crate::sponsors::repository::{
-    CreateGroupError, CreatePackageError, SponsorPackageRepository, UpdatePackagesError,
-    MAX_PACKAGES_PER_EVENT,
+    CreateGroupError, CreatePackageError, DeleteGroupError, DeletePackageError,
+    SponsorPackageRepository, UpdatePackagesError, MAX_PACKAGES_PER_EVENT,
 };
 use crate::sponsors::types::{
     SponsorPackageBatchUpdate, SponsorPackageCreate, SponsorPackageGroupCreate,
@@ -247,6 +247,107 @@ pub async fn handle_admin_create_sponsor_package(
     Ok(resp)
 }
 
+/// DELETE /api/admin/events/:eventSlug/sponsor-packages/:packageId — remove
+/// one package. Returns the refreshed canonical listing so the admin can
+/// replace its state.
+pub async fn handle_admin_delete_sponsor_package(
+    req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+    let package_id = ctx
+        .param("packageId")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: packageId".to_string()))?;
+    validate_delete(event_slug, package_id, "packageId")?;
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = SponsorPackageRepository::new(db);
+
+    let (groups, packages) = repo
+        .delete_package(event_slug, package_id.trim())
+        .await
+        .map_err(|e| match e {
+            DeletePackageError::NotFound => AppError::NotFound(format!(
+                "sponsor package '{package_id}' not found for event {event_slug}"
+            )),
+            DeletePackageError::Db(e) => AppError::Internal(e.to_string()),
+        })?;
+
+    // Safe log: ids only.
+    console_log!("sponsor package deleted: event={event_slug} package_id={package_id}");
+
+    let body = SponsorPackagesResponse {
+        event_slug,
+        currency: "IDR",
+        groups: &groups,
+        packages: &packages,
+    };
+    let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
+    Ok(resp)
+}
+
+/// DELETE /api/admin/events/:eventSlug/sponsor-groups/:groupId — remove a
+/// group only while no package references it (409 otherwise, so packages are
+/// never orphaned). Returns the refreshed canonical listing so the admin can
+/// replace its state.
+pub async fn handle_admin_delete_sponsor_group(
+    req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+    let group_id = ctx
+        .param("groupId")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: groupId".to_string()))?;
+    validate_delete(event_slug, group_id, "groupId")?;
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = SponsorPackageRepository::new(db);
+
+    let (groups, packages) = repo
+        .delete_group(event_slug, group_id.trim())
+        .await
+        .map_err(|e| match e {
+            DeleteGroupError::NotFound => AppError::NotFound(format!(
+                "sponsor group '{group_id}' not found for event {event_slug}"
+            )),
+            DeleteGroupError::GroupInUse => AppError::Conflict(
+                "sponsor group still has packages assigned; reassign or remove them first"
+                    .to_string(),
+            ),
+            DeleteGroupError::Db(e) => AppError::Internal(e.to_string()),
+        })?;
+
+    // Safe log: ids only.
+    console_log!("sponsor group deleted: event={event_slug} group_id={group_id}");
+
+    let body = SponsorPackagesResponse {
+        event_slug,
+        currency: "IDR",
+        groups: &groups,
+        packages: &packages,
+    };
+    let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
+    Ok(resp)
+}
+
 // --- validation helpers ---
 
 fn validate_event_slug(slug: &str) -> Result<(), AppError> {
@@ -303,6 +404,16 @@ fn validate_group_create(
         return Err(AppError::BadRequest(format!(
             "label must be 1..={MAX_GROUP_LABEL_LEN} chars after trim"
         )));
+    }
+    Ok(())
+}
+
+/// Shared path validation for the DELETE endpoints: event slug shape plus a
+/// non-empty entity id after trim.
+fn validate_delete(event_slug: &str, entity_id: &str, field: &str) -> Result<(), AppError> {
+    validate_event_slug(event_slug)?;
+    if entity_id.trim().is_empty() {
+        return Err(AppError::BadRequest(format!("{field} must not be empty")));
     }
     Ok(())
 }
@@ -541,6 +652,41 @@ mod tests {
         assert!(validate_group_create("community day 2026", &create("Digital & Media")).is_err());
         assert!(validate_group_create("", &create("Digital & Media")).is_err());
         assert!(validate_group_create("community_day_2026", &create("Digital & Media")).is_err());
+    }
+
+    #[test]
+    fn delete_rejects_invalid_event_slug() {
+        for slug in ["", "Community Day", "cdn/evil", "UPPER"] {
+            assert!(
+                validate_delete(slug, "lanyard-sponsorship-1-2", "packageId").is_err(),
+                "slug {slug:?} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn delete_requires_non_empty_entity_id() {
+        // Empty and whitespace-only ids are rejected for both entity kinds.
+        assert!(validate_delete("community-day-2026", "", "packageId").is_err());
+        assert!(validate_delete("community-day-2026", "   ", "packageId").is_err());
+        assert!(validate_delete("community-day-2026", "", "groupId").is_err());
+        assert!(validate_delete("community-day-2026", " \t ", "groupId").is_err());
+        // Valid slug + non-empty id passes; field name only shapes the message.
+        assert!(validate_delete("community-day-2026", "digital-media-1-2", "groupId").is_ok());
+    }
+
+    #[test]
+    fn delete_error_mentions_offending_field() {
+        let err = validate_delete("community-day-2026", "  ", "packageId").unwrap_err();
+        match err {
+            AppError::BadRequest(msg) => {
+                assert!(
+                    msg.contains("packageId"),
+                    "message should name the field: {msg}"
+                );
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
     }
 
     fn update(
