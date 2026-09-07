@@ -7,12 +7,13 @@ use crate::config::AppConfig;
 use crate::http::errors::AppError;
 use crate::http::response::{json_success, json_success_cors, with_cors};
 use crate::sponsors::repository::{
-    CreateGroupError, CreatePackageError, DeleteGroupError, DeletePackageError,
-    SponsorPackageRepository, UpdatePackagesError, MAX_PACKAGES_PER_EVENT,
+    CreateGroupError, CreatePackageError, CreateTierError, DeleteGroupError, DeletePackageError,
+    DeleteTierError, SponsorPackageRepository, UpdatePackagesError, UpdateTiersError,
+    MAX_PACKAGES_PER_EVENT, MAX_TIERS_PER_EVENT,
 };
 use crate::sponsors::types::{
     SponsorPackageBatchUpdate, SponsorPackageCreate, SponsorPackageGroupCreate,
-    SponsorPackagesResponse,
+    SponsorPackagesResponse, SponsorTierBatchUpdate, SponsorTierCreate,
 };
 
 const MAX_PACKAGES_PER_UPDATE: usize = 50;
@@ -26,6 +27,11 @@ const MAX_PACKAGE_ADVANTAGE_LEN: usize = 500;
 const MIN_GROUP_ORDER: i32 = 1;
 const MAX_GROUP_ORDER: i32 = 1_000;
 const MAX_EVENT_SLUG_LEN: usize = 100;
+const MIN_THRESHOLD_IDR: i64 = 1;
+const MAX_THRESHOLD_IDR: i64 = 1_000_000_000;
+const MAX_TIER_LABEL_LEN: usize = 60;
+/// Accent values accepted for sponsor tiers; mirrors the table CHECK.
+const ACCENT_ALLOWLIST: &[&str] = &["platinum", "gold", "silver", "bronze", "default"];
 
 /// GET /api/events/:eventSlug/sponsor-packages — public listing, locked rows included.
 pub async fn handle_public_sponsor_packages(
@@ -59,12 +65,17 @@ pub async fn handle_public_sponsor_packages(
         ))
         .into());
     }
+    let tiers = repo
+        .list_tiers(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let body = SponsorPackagesResponse {
         event_slug,
         currency: "IDR",
         groups: &groups,
         packages: &packages,
+        tiers: &tiers,
     };
     let resp = json_success(&body)?;
     with_cors(resp, &config.allowed_origins)
@@ -129,11 +140,17 @@ pub async fn handle_admin_update_sponsor_packages(
             .count(),
     );
 
+    let tiers = repo
+        .list_tiers(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
     let body = SponsorPackagesResponse {
         event_slug,
         currency: "IDR",
         groups: &groups,
         packages: &packages,
+        tiers: &tiers,
     };
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
@@ -178,11 +195,17 @@ pub async fn handle_admin_create_sponsor_group(
 
     console_log!("sponsor group created: event={event_slug} group_id={group_id}");
 
+    let tiers = repo
+        .list_tiers(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
     let body = SponsorPackagesResponse {
         event_slug,
         currency: "IDR",
         groups: &groups,
         packages: &packages,
+        tiers: &tiers,
     };
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
@@ -237,11 +260,17 @@ pub async fn handle_admin_create_sponsor_package(
         "sponsor package created: event={event_slug} package_id={package_id} group_id={group_id}"
     );
 
+    let tiers = repo
+        .list_tiers(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
     let body = SponsorPackagesResponse {
         event_slug,
         currency: "IDR",
         groups: &groups,
         packages: &packages,
+        tiers: &tiers,
     };
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
@@ -285,11 +314,17 @@ pub async fn handle_admin_delete_sponsor_package(
     // Safe log: ids only.
     console_log!("sponsor package deleted: event={event_slug} package_id={package_id}");
 
+    let tiers = repo
+        .list_tiers(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
     let body = SponsorPackagesResponse {
         event_slug,
         currency: "IDR",
         groups: &groups,
         packages: &packages,
+        tiers: &tiers,
     };
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
@@ -338,11 +373,211 @@ pub async fn handle_admin_delete_sponsor_group(
     // Safe log: ids only.
     console_log!("sponsor group deleted: event={event_slug} group_id={group_id}");
 
+    let tiers = repo
+        .list_tiers(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
     let body = SponsorPackagesResponse {
         event_slug,
         currency: "IDR",
         groups: &groups,
         packages: &packages,
+        tiers: &tiers,
+    };
+    let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
+    Ok(resp)
+}
+
+// --- sponsor tiers ---
+
+/// POST /api/admin/events/:eventSlug/sponsor-tiers — create a tier with a
+/// server-generated id. 409 on duplicate case-insensitive label or duplicate
+/// threshold within the event. Returns the refreshed canonical listing so
+/// the admin can replace its state.
+pub async fn handle_admin_create_sponsor_tier(
+    mut req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+
+    let bytes = req.bytes().await?;
+    let input: SponsorTierCreate = serde_json::from_slice(&bytes).map_err(AppError::from)?;
+    validate_tier_create(event_slug, &input)?;
+    let label = input.label.trim();
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = SponsorPackageRepository::new(db);
+
+    let (tier_id, tiers) = repo
+        .create_tier(event_slug, label, input.threshold_idr, &input.accent)
+        .await
+        .map_err(|e| match e {
+            CreateTierError::DuplicateLabel => AppError::Conflict(format!(
+                "sponsor tier label '{label}' already exists for event {event_slug}"
+            )),
+            CreateTierError::DuplicateThreshold => AppError::Conflict(format!(
+                "sponsor tier threshold {} already exists for event {event_slug}",
+                input.threshold_idr
+            )),
+            CreateTierError::TierLimit => AppError::BadRequest(format!(
+                "event {event_slug} already has the maximum of {MAX_TIERS_PER_EVENT} sponsor tiers"
+            )),
+            CreateTierError::Db(e) => AppError::Internal(e.to_string()),
+        })?;
+
+    let groups = repo
+        .list_groups(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let packages = repo
+        .list_packages(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    // Safe log: ids and numeric threshold only, never free-text label.
+    console_log!(
+        "sponsor tier created: event={event_slug} tier_id={tier_id} threshold_idr={}",
+        input.threshold_idr
+    );
+
+    let body = SponsorPackagesResponse {
+        event_slug,
+        currency: "IDR",
+        groups: &groups,
+        packages: &packages,
+        tiers: &tiers,
+    };
+    let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
+    Ok(resp)
+}
+
+/// PUT /api/admin/events/:eventSlug/sponsor-tiers — batch rename/rethreshold/
+/// re-accent. Ids must exist and final thresholds must stay unique per event;
+/// both checked before any mutation. Returns the refreshed canonical listing.
+pub async fn handle_admin_update_sponsor_tiers(
+    mut req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+
+    let bytes = req.bytes().await?;
+    let input: SponsorTierBatchUpdate = serde_json::from_slice(&bytes).map_err(AppError::from)?;
+    validate_tier_batch(event_slug, &input)?;
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = SponsorPackageRepository::new(db);
+
+    let tiers = repo
+        .update_tiers(event_slug, &input.tiers)
+        .await
+        .map_err(|e| match e {
+            UpdateTiersError::UnknownIds(ids) => AppError::BadRequest(format!(
+                "unknown sponsor tier id(s) for event {event_slug}: {}",
+                ids.join(", ")
+            )),
+            UpdateTiersError::DuplicateThreshold => AppError::BadRequest(
+                "tier thresholdIdr values must stay unique per event".to_string(),
+            ),
+            UpdateTiersError::Db(e) => AppError::Internal(e.to_string()),
+        })?;
+
+    let groups = repo
+        .list_groups(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let packages = repo
+        .list_packages(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    console_log!(
+        "sponsor tiers updated: event={event_slug} tier_count={}",
+        input.tiers.len()
+    );
+
+    let body = SponsorPackagesResponse {
+        event_slug,
+        currency: "IDR",
+        groups: &groups,
+        packages: &packages,
+        tiers: &tiers,
+    };
+    let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
+    Ok(resp)
+}
+
+/// DELETE /api/admin/events/:eventSlug/sponsor-tiers/:tierId — remove one
+/// tier. Tiers have no dependents, so no in-use guard is needed. Returns the
+/// refreshed canonical listing so the admin can replace its state.
+pub async fn handle_admin_delete_sponsor_tier(
+    req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+    let tier_id = ctx
+        .param("tierId")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: tierId".to_string()))?;
+    validate_delete(event_slug, tier_id, "tierId")?;
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = SponsorPackageRepository::new(db);
+
+    let tiers = repo
+        .delete_tier(event_slug, tier_id.trim())
+        .await
+        .map_err(|e| match e {
+            DeleteTierError::NotFound => AppError::NotFound(format!(
+                "sponsor tier '{tier_id}' not found for event {event_slug}"
+            )),
+            DeleteTierError::Db(e) => AppError::Internal(e.to_string()),
+        })?;
+
+    let groups = repo
+        .list_groups(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let packages = repo
+        .list_packages(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    // Safe log: ids only.
+    console_log!("sponsor tier deleted: event={event_slug} tier_id={tier_id}");
+
+    let body = SponsorPackagesResponse {
+        event_slug,
+        currency: "IDR",
+        groups: &groups,
+        packages: &packages,
+        tiers: &tiers,
     };
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
@@ -404,6 +639,72 @@ fn validate_group_create(
         return Err(AppError::BadRequest(format!(
             "label must be 1..={MAX_GROUP_LABEL_LEN} chars after trim"
         )));
+    }
+    Ok(())
+}
+
+fn validate_tier_create(event_slug: &str, input: &SponsorTierCreate) -> Result<(), AppError> {
+    validate_event_slug(event_slug)?;
+    validate_tier_fields(&input.label, input.threshold_idr, &input.accent)?;
+    Ok(())
+}
+
+/// PUT /api/admin/events/:eventSlug/sponsor-tiers body: non-empty, capped at
+/// the per-event tier limit, ids unique; every entry passes field validation.
+/// Thresholds are also checked for duplicates within the body here — the
+/// repository re-checks final thresholds against the whole event set.
+fn validate_tier_batch(event_slug: &str, input: &SponsorTierBatchUpdate) -> Result<(), AppError> {
+    validate_event_slug(event_slug)?;
+    if input.tiers.is_empty() {
+        return Err(AppError::BadRequest("tiers must not be empty".to_string()));
+    }
+    if input.tiers.len() > MAX_TIERS_PER_EVENT {
+        return Err(AppError::BadRequest(format!(
+            "tiers count must be <= {MAX_TIERS_PER_EVENT}"
+        )));
+    }
+
+    let mut seen_ids: HashSet<&str> = HashSet::with_capacity(input.tiers.len());
+    let mut seen_thresholds: HashSet<i64> = HashSet::with_capacity(input.tiers.len());
+    for t in &input.tiers {
+        let id = t.id.trim();
+        if id.is_empty() {
+            return Err(AppError::BadRequest(
+                "tier id must not be empty".to_string(),
+            ));
+        }
+        if !seen_ids.insert(id) {
+            return Err(AppError::BadRequest(format!("duplicate tier id: {id}")));
+        }
+        validate_tier_fields(&t.label, t.threshold_idr, &t.accent)?;
+        if !seen_thresholds.insert(t.threshold_idr) {
+            return Err(AppError::BadRequest(format!(
+                "duplicate tier thresholdIdr: {}",
+                t.threshold_idr
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Shared tier field validation: label 1..=60 after trim, threshold in
+/// 1..=1_000_000_000, accent in the allowlist.
+fn validate_tier_fields(label: &str, threshold_idr: i64, accent: &str) -> Result<(), AppError> {
+    let label = label.trim();
+    if label.is_empty() || label.len() > MAX_TIER_LABEL_LEN {
+        return Err(AppError::BadRequest(format!(
+            "tier label must be 1..={MAX_TIER_LABEL_LEN} chars after trim"
+        )));
+    }
+    if !(MIN_THRESHOLD_IDR..=MAX_THRESHOLD_IDR).contains(&threshold_idr) {
+        return Err(AppError::BadRequest(format!(
+            "thresholdIdr must be {MIN_THRESHOLD_IDR}..={MAX_THRESHOLD_IDR}"
+        )));
+    }
+    if !ACCENT_ALLOWLIST.contains(&accent) {
+        return Err(AppError::BadRequest(
+            "accent is not in allowlist".to_string(),
+        ));
     }
     Ok(())
 }
@@ -1076,5 +1377,188 @@ mod tests {
         assert_eq!(input.groups[0].label, "On-Site & Physical");
         assert_eq!(input.groups[0].display_order, 1);
         assert!(validate_batch("community-day-2026", &input).is_ok());
+    }
+
+    fn tier_create(label: &str, threshold_idr: i64, accent: &str) -> SponsorTierCreate {
+        SponsorTierCreate {
+            label: label.to_string(),
+            threshold_idr,
+            accent: accent.to_string(),
+        }
+    }
+
+    fn tier_update(
+        id: &str,
+        label: &str,
+        threshold_idr: i64,
+        accent: &str,
+    ) -> crate::sponsors::types::SponsorTierUpdate {
+        crate::sponsors::types::SponsorTierUpdate {
+            id: id.to_string(),
+            label: label.to_string(),
+            threshold_idr,
+            accent: accent.to_string(),
+        }
+    }
+
+    #[test]
+    fn tier_create_field_boundaries() {
+        let ok = tier_create("Platinum", 40_000_000, "platinum");
+        assert!(validate_tier_create("community-day-2026", &ok).is_ok());
+        // Whitespace-only trims to empty.
+        assert!(
+            validate_tier_create("community-day-2026", &tier_create("   ", 1, "default")).is_err()
+        );
+        // Label 1..=60 after trim.
+        assert!(validate_tier_create(
+            "community-day-2026",
+            &tier_create(&"x".repeat(60), 1, "default")
+        )
+        .is_ok());
+        assert!(validate_tier_create(
+            "community-day-2026",
+            &tier_create(&"x".repeat(61), 1, "default")
+        )
+        .is_err());
+        // Surrounding whitespace does not count toward the limit.
+        assert!(validate_tier_create(
+            "community-day-2026",
+            &tier_create(&format!("  {}  ", "x".repeat(60)), 1, "default")
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn tier_create_threshold_bounds() {
+        for threshold in [1, 10_000_000, 1_000_000_000] {
+            assert!(
+                validate_tier_create(
+                    "community-day-2026",
+                    &tier_create("Gold", threshold, "gold")
+                )
+                .is_ok(),
+                "threshold {threshold}"
+            );
+        }
+        for threshold in [0, -1, 1_000_000_001, i64::MAX] {
+            let err = validate_tier_create(
+                "community-day-2026",
+                &tier_create("Gold", threshold, "gold"),
+            )
+            .unwrap_err();
+            assert_eq!(err.status_code(), 400);
+            assert!(
+                err.message().contains("thresholdIdr"),
+                "threshold {threshold}"
+            );
+        }
+    }
+
+    #[test]
+    fn tier_create_accent_allowlist() {
+        for accent in ["platinum", "gold", "silver", "bronze", "default"] {
+            assert!(
+                validate_tier_create("community-day-2026", &tier_create("T", 1, accent)).is_ok(),
+                "accent {accent}"
+            );
+        }
+        for accent in ["", "neon", "GOLD", " gold", "diamond", "default2"] {
+            let err = validate_tier_create("community-day-2026", &tier_create("T", 1, accent))
+                .unwrap_err();
+            assert_eq!(err.status_code(), 400);
+            assert!(err.message().contains("accent"), "accent {accent:?}");
+        }
+    }
+
+    #[test]
+    fn tier_create_rejects_invalid_event_slug() {
+        let input = tier_create("Platinum", 40_000_000, "platinum");
+        for slug in ["", "Community Day", "cdn/evil", "UPPER"] {
+            assert!(
+                validate_tier_create(slug, &input).is_err(),
+                "slug {slug:?} should be rejected"
+            );
+        }
+    }
+
+    fn tier_batch(tiers: Vec<crate::sponsors::types::SponsorTierUpdate>) -> SponsorTierBatchUpdate {
+        SponsorTierBatchUpdate { tiers }
+    }
+
+    #[test]
+    fn tier_batch_rejects_empty_and_over_limit() {
+        let err = validate_tier_batch("community-day-2026", &tier_batch(vec![])).unwrap_err();
+        assert!(err.message().contains("not be empty"));
+
+        let over = tier_batch(
+            (0..11)
+                .map(|i| tier_update(&format!("t-{i}"), "T", (i + 1) * 1_000_000, "default"))
+                .collect(),
+        );
+        let err = validate_tier_batch("community-day-2026", &over).unwrap_err();
+        assert!(err.message().contains("<= 10"));
+
+        let at_limit = tier_batch(
+            (0..10)
+                .map(|i| tier_update(&format!("t-{i}"), "T", (i + 1) * 1_000_000, "default"))
+                .collect(),
+        );
+        assert!(validate_tier_batch("community-day-2026", &at_limit).is_ok());
+    }
+
+    #[test]
+    fn tier_batch_rejects_duplicate_ids_and_thresholds() {
+        let dup_ids = tier_batch(vec![
+            tier_update("platinum", "Platinum", 40_000_000, "platinum"),
+            tier_update("platinum", "Other", 25_000_000, "gold"),
+        ]);
+        let err = validate_tier_batch("community-day-2026", &dup_ids).unwrap_err();
+        assert!(err.message().contains("duplicate tier id"));
+
+        let dup_thresholds = tier_batch(vec![
+            tier_update("platinum", "Platinum", 40_000_000, "platinum"),
+            tier_update("gold", "Gold", 40_000_000, "gold"),
+        ]);
+        let err = validate_tier_batch("community-day-2026", &dup_thresholds).unwrap_err();
+        assert!(err.message().contains("duplicate tier thresholdIdr"));
+    }
+
+    #[test]
+    fn tier_batch_accepts_threshold_swap() {
+        // Swapping thresholds between tiers is the two-phase case and must
+        // pass body validation (distinct ids, distinct thresholds in body).
+        let input = tier_batch(vec![
+            tier_update("platinum", "Platinum", 25_000_000, "platinum"),
+            tier_update("gold", "Gold", 40_000_000, "gold"),
+        ]);
+        assert!(validate_tier_batch("community-day-2026", &input).is_ok());
+    }
+
+    #[test]
+    fn tier_batch_rejects_bad_fields_per_entry() {
+        for (label, threshold, accent) in [
+            ("", 1, "default"),
+            ("   ", 1, "default"),
+            (&"x".repeat(61), 1, "default"),
+            ("T", 0, "default"),
+            ("T", 1_000_000_001, "default"),
+            ("T", 1, "neon"),
+        ] {
+            let input = tier_batch(vec![tier_update("platinum", label, threshold, accent)]);
+            let err = validate_tier_batch("community-day-2026", &input).unwrap_err();
+            assert_eq!(
+                err.status_code(),
+                400,
+                "case ({label:?}, {threshold}, {accent})"
+            );
+        }
+        // Empty id rejected.
+        let input = tier_batch(vec![tier_update("  ", "T", 1, "default")]);
+        assert!(validate_tier_batch("community-day-2026", &input).is_err());
+        // Invalid event slug rejected.
+        let input = tier_batch(vec![tier_update(
+            "platinum", "Platinum", 40_000_000, "platinum",
+        )]);
+        assert!(validate_tier_batch("UPPER", &input).is_err());
     }
 }

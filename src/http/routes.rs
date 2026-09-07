@@ -266,6 +266,36 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             },
         )
         // ---------------------------------------------------------------
+        // POST /api/admin/events/:eventSlug/sponsor-tiers — create a
+        // sponsor tier (admin-only, origin-reflected CORS)
+        // ---------------------------------------------------------------
+        .post_async(
+            "/api/admin/events/:eventSlug/sponsor-tiers",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_create_sponsor_tier(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
+        // PUT /api/admin/events/:eventSlug/sponsor-tiers — batch tier
+        // rename/rethreshold/re-accent (admin-only, origin-reflected CORS)
+        // ---------------------------------------------------------------
+        .put_async(
+            "/api/admin/events/:eventSlug/sponsor-tiers",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_update_sponsor_tiers(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
+        // DELETE /api/admin/events/:eventSlug/sponsor-tiers/:tierId —
+        // delete a sponsor tier (admin-only, origin-reflected CORS)
+        // ---------------------------------------------------------------
+        .delete_async(
+            "/api/admin/events/:eventSlug/sponsor-tiers/:tierId",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_delete_sponsor_tier(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
         // CORS preflight for all /api/* routes
         // ---------------------------------------------------------------
         .options("/api/*rest", |_req, ctx| {

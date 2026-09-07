@@ -7,10 +7,14 @@ use worker::{D1Database, Result as WorkerResult};
 
 use crate::sponsors::types::{
     SponsorPackage, SponsorPackageGroup, SponsorPackageGroupUpdate, SponsorPackageUpdate,
+    SponsorTier, SponsorTierUpdate,
 };
 
 /// Hard cap on packages per event, enforced on create.
 pub(crate) const MAX_PACKAGES_PER_EVENT: usize = 200;
+
+/// Hard cap on sponsor tiers per event, enforced on create and batch update.
+pub(crate) const MAX_TIERS_PER_EVENT: usize = 10;
 
 /// Seeded group whose packages must keep the legacy `onsite` category.
 pub(crate) const ONSITE_GROUP_ID: &str = "onsite-physical";
@@ -133,6 +137,21 @@ fn changed_rows(result: &D1Result) -> WorkerResult<usize> {
     Ok(result.meta()?.and_then(|m| m.changes).unwrap_or(0))
 }
 
+/// Whether the final per-event threshold map (current values with update
+/// overrides applied) contains any duplicate. Pure so the swap/collision
+/// logic is unit-testable without D1.
+fn has_duplicate_final_threshold(existing: &[SponsorTier], updates: &[SponsorTierUpdate]) -> bool {
+    let mut finals: HashMap<&str, i64> = existing
+        .iter()
+        .map(|t| (t.id.as_str(), t.threshold_idr))
+        .collect();
+    for u in updates {
+        finals.insert(u.id.trim(), u.threshold_idr);
+    }
+    let mut seen = HashSet::with_capacity(finals.len());
+    finals.values().any(|v| !seen.insert(*v))
+}
+
 /// Failure modes of a batch update. `UnknownIds`, `UnknownGroupIds`, and
 /// `OrderConflict` are reported before any statement runs, so no row is
 /// mutated.
@@ -147,6 +166,54 @@ pub enum UpdatePackagesError {
 impl From<worker::Error> for UpdatePackagesError {
     fn from(err: worker::Error) -> Self {
         UpdatePackagesError::Db(err)
+    }
+}
+
+/// Failure modes of a tier create. `DuplicateLabel`, `DuplicateThreshold`,
+/// and `TierLimit` are detected before any statement runs, so no row is
+/// mutated.
+#[derive(Debug)]
+pub enum CreateTierError {
+    DuplicateLabel,
+    DuplicateThreshold,
+    TierLimit,
+    Db(worker::Error),
+}
+
+impl From<worker::Error> for CreateTierError {
+    fn from(err: worker::Error) -> Self {
+        CreateTierError::Db(err)
+    }
+}
+
+/// Failure modes of a tier batch update. `UnknownIds` and
+/// `DuplicateThreshold` are reported before any statement runs, so no row
+/// is mutated.
+#[derive(Debug)]
+pub enum UpdateTiersError {
+    UnknownIds(Vec<String>),
+    DuplicateThreshold,
+    Db(worker::Error),
+}
+
+impl From<worker::Error> for UpdateTiersError {
+    fn from(err: worker::Error) -> Self {
+        UpdateTiersError::Db(err)
+    }
+}
+
+/// Failure modes of a tier delete. `NotFound` means no row matched the
+/// (event_slug, id) pair, so nothing was mutated. Tiers have no dependents,
+/// so there is no in-use variant.
+#[derive(Debug)]
+pub enum DeleteTierError {
+    NotFound,
+    Db(worker::Error),
+}
+
+impl From<worker::Error> for DeleteTierError {
+    fn from(err: worker::Error) -> Self {
+        DeleteTierError::Db(err)
     }
 }
 
@@ -535,6 +602,169 @@ impl SponsorPackageRepository {
             self.list_packages(event_slug).await?,
         ))
     }
+
+    /// List all tiers for an event ordered by threshold_idr DESC (tier order
+    /// IS threshold order; there is deliberately no display_order).
+    pub async fn list_tiers(&self, event_slug: &str) -> WorkerResult<Vec<SponsorTier>> {
+        let sql = r#"
+            SELECT id, event_slug, label, threshold_idr, accent, updated_at
+            FROM sponsor_tiers
+            WHERE event_slug = ?
+            ORDER BY threshold_idr DESC
+        "#;
+        let result = self
+            .db
+            .prepare(sql)
+            .bind(&[JsValue::from_str(event_slug)])?
+            .all()
+            .await?;
+        result.results::<SponsorTier>()
+    }
+
+    /// Create a tier for an event: server-generated id (slug + entropy,
+    /// checked absent). Label (case-insensitive) and threshold must be unique
+    /// within the event. Returns the new id plus the refreshed tier listing.
+    pub async fn create_tier(
+        &self,
+        event_slug: &str,
+        label: &str,
+        threshold_idr: i64,
+        accent: &str,
+    ) -> Result<(String, Vec<SponsorTier>), CreateTierError> {
+        let existing = self.list_tiers(event_slug).await?;
+        if existing
+            .iter()
+            .any(|t| t.label.trim().eq_ignore_ascii_case(label))
+        {
+            return Err(CreateTierError::DuplicateLabel);
+        }
+        if existing.iter().any(|t| t.threshold_idr == threshold_idr) {
+            return Err(CreateTierError::DuplicateThreshold);
+        }
+        if existing.len() >= MAX_TIERS_PER_EVENT {
+            return Err(CreateTierError::TierLimit);
+        }
+
+        let id = generate_unique_id(label, "tier", |candidate| {
+            existing.iter().any(|t| t.id == candidate)
+        })?;
+
+        self.db
+            .prepare(
+                r#"
+                INSERT INTO sponsor_tiers
+                    (id, event_slug, label, threshold_idr, accent, updated_at)
+                VALUES (?, ?, ?, ?, ?, datetime('now'))
+            "#,
+            )
+            .bind(&[
+                JsValue::from_str(&id),
+                JsValue::from_str(event_slug),
+                JsValue::from_str(label),
+                JsValue::from_f64(threshold_idr as f64),
+                JsValue::from_str(accent),
+            ])?
+            .run()
+            .await?;
+
+        Ok((id, self.list_tiers(event_slug).await?))
+    }
+
+    /// Validate requested tier ids against the fixed event set and final
+    /// thresholds for uniqueness across the whole event, then apply all
+    /// updates in one D1 batch and return the refreshed tier listing.
+    ///
+    /// Membership may change concurrently via the create/delete endpoints,
+    /// so unknown ids can still surface as a no-op UPDATE; the pre-checks
+    /// keep that window negligible and the UNIQUE(event_slug, threshold_idr)
+    /// constraint backstops collisions.
+    ///
+    /// Threshold rewrites are two-phase for the same reason as group
+    /// display_order rewrites: the UNIQUE(event_slug, threshold_idr)
+    /// constraint is immediate, so swapping thresholds between tiers would
+    /// collide in one pass. Phase one moves every updated tier to a distinct
+    /// negative temporary threshold, phase two writes the final positive
+    /// values — all inside the same batch, so a failure leaves rows
+    /// untouched. Negative temps are why sponsor_tiers has no CHECK on
+    /// threshold_idr; the 1..=1_000_000_000 range is enforced at the
+    /// application layer.
+    pub async fn update_tiers(
+        &self,
+        event_slug: &str,
+        tier_updates: &[SponsorTierUpdate],
+    ) -> Result<Vec<SponsorTier>, UpdateTiersError> {
+        let existing = self.list_tiers(event_slug).await?;
+
+        let known_ids: HashSet<&str> = existing.iter().map(|t| t.id.as_str()).collect();
+        let unknown: Vec<String> = tier_updates
+            .iter()
+            .filter(|t| !known_ids.contains(t.id.trim()))
+            .map(|t| t.id.trim().to_string())
+            .collect();
+        if !unknown.is_empty() {
+            return Err(UpdateTiersError::UnknownIds(unknown));
+        }
+
+        // Final thresholds (updates applied over current state) must stay
+        // unique per event; checked before any mutation so a partial edit
+        // targeting a threshold still held by an untouched tier fails clean.
+        if has_duplicate_final_threshold(&existing, tier_updates) {
+            return Err(UpdateTiersError::DuplicateThreshold);
+        }
+
+        let temp_sql = "UPDATE sponsor_tiers SET threshold_idr = ? WHERE event_slug = ? AND id = ?";
+        let final_sql = r#"
+            UPDATE sponsor_tiers
+            SET label = ?, threshold_idr = ?, accent = ?, updated_at = datetime('now')
+            WHERE event_slug = ? AND id = ?
+        "#;
+
+        let mut statements = Vec::with_capacity(tier_updates.len() * 2);
+        // Phase one: distinct negative temp thresholds (never collide with
+        // the 1..=1_000_000_000 app-validated range or with each other).
+        for (i, t) in tier_updates.iter().enumerate() {
+            statements.push(self.db.prepare(temp_sql).bind(&[
+                JsValue::from_f64(-(i as f64) - 1.0),
+                JsValue::from_str(event_slug),
+                JsValue::from_str(t.id.trim()),
+            ])?);
+        }
+        // Phase two: final positive thresholds, labels, and accents.
+        for t in tier_updates {
+            statements.push(self.db.prepare(final_sql).bind(&[
+                JsValue::from_str(t.label.trim()),
+                JsValue::from_f64(t.threshold_idr as f64),
+                JsValue::from_str(&t.accent),
+                JsValue::from_str(event_slug),
+                JsValue::from_str(t.id.trim()),
+            ])?);
+        }
+        self.db.batch(statements).await?;
+
+        Ok(self.list_tiers(event_slug).await?)
+    }
+
+    /// Delete a tier for an event. Tiers have no dependents, so there is no
+    /// in-use guard. Verifies the affected-row count so a missing (or
+    /// cross-event) id maps to `NotFound` instead of a silent success.
+    /// Returns the refreshed tier listing.
+    pub async fn delete_tier(
+        &self,
+        event_slug: &str,
+        tier_id: &str,
+    ) -> Result<Vec<SponsorTier>, DeleteTierError> {
+        let result = self
+            .db
+            .prepare("DELETE FROM sponsor_tiers WHERE event_slug = ? AND id = ?")
+            .bind(&[JsValue::from_str(event_slug), JsValue::from_str(tier_id)])?
+            .run()
+            .await?;
+        if changed_rows(&result)? == 0 {
+            return Err(DeleteTierError::NotFound);
+        }
+
+        Ok(self.list_tiers(event_slug).await?)
+    }
 }
 
 #[derive(Deserialize)]
@@ -589,5 +819,60 @@ mod tests {
         );
         // rand is masked to a short suffix.
         assert!(a.ends_with("-dead"));
+    }
+
+    fn tier(id: &str, threshold_idr: i64) -> SponsorTier {
+        SponsorTier {
+            id: id.to_string(),
+            event_slug: "community-day-2026".to_string(),
+            label: format!("Tier {id}"),
+            threshold_idr,
+            accent: "default".to_string(),
+            updated_at: "2026-01-01 00:00:00".to_string(),
+        }
+    }
+
+    fn tier_update(id: &str, threshold_idr: i64) -> SponsorTierUpdate {
+        SponsorTierUpdate {
+            id: id.to_string(),
+            label: format!("Tier {id}"),
+            threshold_idr,
+            accent: "default".to_string(),
+        }
+    }
+
+    #[test]
+    fn final_threshold_swap_is_unique() {
+        // Swapping the two thresholds is exactly the case the two-phase
+        // rewrite exists for: final values stay unique, so it must pass.
+        let existing = vec![tier("platinum", 40_000_000), tier("gold", 25_000_000)];
+        let updates = vec![
+            tier_update("platinum", 25_000_000),
+            tier_update("gold", 40_000_000),
+        ];
+        assert!(!has_duplicate_final_threshold(&existing, &updates));
+    }
+
+    #[test]
+    fn final_threshold_collision_is_detected() {
+        let existing = vec![tier("platinum", 40_000_000), tier("gold", 25_000_000)];
+        // Update targets a threshold still held by an untouched tier.
+        let updates = vec![tier_update("platinum", 25_000_000)];
+        assert!(has_duplicate_final_threshold(&existing, &updates));
+        // Duplicate inside the update body itself.
+        let dup_in_body = vec![
+            tier_update("platinum", 10_000_000),
+            tier_update("gold", 10_000_000),
+        ];
+        assert!(has_duplicate_final_threshold(&existing, &dup_in_body));
+        // Distinct values stay clean, including overlapping an old value that
+        // the same update vacates.
+        let ok = vec![
+            tier_update("platinum", 25_000_000),
+            tier_update("gold", 10_000_000),
+        ];
+        assert!(!has_duplicate_final_threshold(&existing, &ok));
+        // Untouched duplicate-free state stays clean.
+        assert!(!has_duplicate_final_threshold(&existing, &[]));
     }
 }

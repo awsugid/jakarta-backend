@@ -104,6 +104,55 @@ pub struct SponsorPackageGroup {
     pub updated_at: String,
 }
 
+/// Row from the `sponsor_tiers` table. Tier order IS threshold order, so
+/// listings always come back sorted by threshold_idr DESC.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SponsorTier {
+    pub id: String,
+    #[serde(alias = "event_slug")]
+    pub event_slug: String,
+    pub label: String,
+    /// Minimum total spend (whole IDR) in 1..=1_000_000_000; range enforced
+    /// at the application layer (the table deliberately has no CHECK so the
+    /// batch update can use temporary negative values during swaps).
+    #[serde(alias = "threshold_idr")]
+    pub threshold_idr: i64,
+    /// One of the ACCENT_ALLOWLIST values; constrained by the table CHECK.
+    pub accent: String,
+    #[serde(alias = "updated_at")]
+    pub updated_at: String,
+}
+
+/// POST /api/admin/events/:eventSlug/sponsor-tiers body. The server owns
+/// id; clients send display fields plus the threshold and accent only.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SponsorTierCreate {
+    pub label: String,
+    pub threshold_idr: i64,
+    pub accent: String,
+}
+
+/// Entry of the tiers array of the admin tier PUT body (rename/rethreshold/
+/// re-accent only; ids are stable — tiers are created/deleted via the
+/// dedicated endpoints).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SponsorTierUpdate {
+    pub id: String,
+    pub label: String,
+    pub threshold_idr: i64,
+    pub accent: String,
+}
+
+/// PUT /api/admin/events/:eventSlug/sponsor-tiers body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SponsorTierBatchUpdate {
+    pub tiers: Vec<SponsorTierUpdate>,
+}
+
 /// PUT /api/admin/events/:eventSlug/sponsor-packages body. Both arrays must
 /// be present; either may be empty, but not both.
 #[derive(Debug, Clone, Deserialize)]
@@ -122,6 +171,8 @@ pub struct SponsorPackagesResponse<'a> {
     /// Groups ordered by display_order; empty when the event has none seeded.
     pub groups: &'a [SponsorPackageGroup],
     pub packages: &'a [SponsorPackage],
+    /// Tiers ordered by threshold_idr DESC; empty when the event has none seeded.
+    pub tiers: &'a [SponsorTier],
 }
 
 #[cfg(test)]
@@ -443,6 +494,63 @@ mod tests {
         // Missing groups array is rejected: both arrays must be present.
         assert!(serde_json::from_str::<SponsorPackageBatchUpdate>(
             r#"{"packages":[{"id":"web-logo","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true}]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sponsor_tier_row_snake_in_camel_out() {
+        // snake_case D1 row deserializes via aliases.
+        let row: SponsorTier = serde_json::from_str(
+            r#"{"id":"platinum","event_slug":"community-day-2026","label":"Platinum","threshold_idr":40000000,"accent":"platinum","updated_at":"2026-01-01 00:00:00"}"#,
+        )
+        .unwrap();
+        assert_eq!(row.id, "platinum");
+        assert_eq!(row.event_slug, "community-day-2026");
+        assert_eq!(row.threshold_idr, 40_000_000);
+        assert_eq!(row.accent, "platinum");
+        // Serialize side is camelCase for API clients.
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["thresholdIdr"], 40_000_000);
+        assert_eq!(json["eventSlug"], "community-day-2026");
+        assert_eq!(json["updatedAt"], "2026-01-01 00:00:00");
+        assert!(json.get("threshold_idr").is_none());
+    }
+
+    #[test]
+    fn tier_create_requires_typed_fields() {
+        let ok: SponsorTierCreate = serde_json::from_str(
+            r#"{"label":"Platinum","thresholdIdr":40000000,"accent":"platinum"}"#,
+        )
+        .unwrap();
+        assert_eq!(ok.label, "Platinum");
+        assert_eq!(ok.threshold_idr, 40_000_000);
+        // Missing any field, float threshold, or non-string accent rejected.
+        assert!(serde_json::from_str::<SponsorTierCreate>(r#"{}"#).is_err());
+        assert!(serde_json::from_str::<SponsorTierCreate>(
+            r#"{"label":"P","thresholdIdr":1.5,"accent":"gold"}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<SponsorTierCreate>(
+            r#"{"label":"P","thresholdIdr":10,"accent":7}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn tier_batch_body_requires_tiers_array() {
+        let body: SponsorTierBatchUpdate = serde_json::from_str(
+            r#"{"tiers":[{"id":"platinum","label":"Platinum","thresholdIdr":40000000,"accent":"platinum"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(body.tiers.len(), 1);
+        assert_eq!(body.tiers[0].id, "platinum");
+        assert_eq!(body.tiers[0].threshold_idr, 40_000_000);
+        // Missing tiers array is rejected.
+        assert!(serde_json::from_str::<SponsorTierBatchUpdate>(r#"{}"#).is_err());
+        // Float thresholds are rejected.
+        assert!(serde_json::from_str::<SponsorTierBatchUpdate>(
+            r#"{"tiers":[{"id":"p","label":"P","thresholdIdr":40.5,"accent":"gold"}]}"#
         )
         .is_err());
     }
