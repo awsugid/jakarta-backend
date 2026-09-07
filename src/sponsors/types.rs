@@ -46,6 +46,10 @@ pub struct SponsorPackage {
 #[serde(rename_all = "camelCase")]
 pub struct SponsorPackageUpdate {
     pub id: String,
+    /// Display name; 1..=80 chars after trim, unique per event (case-insensitive).
+    pub name: String,
+    /// Advantage/description; 1..=500 chars after trim.
+    pub advantage: String,
     pub price_idr: i64,
     /// Optional threshold in the same 1..=1_000_000_000 bounds; null clears it.
     pub minimum_spend_idr: Option<i64>,
@@ -280,7 +284,7 @@ mod tests {
 
     #[test]
     fn update_entry_rejects_non_bool_unlock_and_float_price() {
-        let base = r#"{"id":"web-logo","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true}"#;
+        let base = r#"{"id":"web-logo","name":"Web Logo","advantage":"Logo on website","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true}"#;
         assert!(serde_json::from_str::<SponsorPackageUpdate>(base).is_ok());
         assert!(serde_json::from_str::<SponsorPackageUpdate>(
             r#"{"id":"web-logo","priceIdr":2500000.5,"reservedSponsors":0,"isUnlocked":true}"#
@@ -293,20 +297,37 @@ mod tests {
     }
 
     #[test]
+    fn update_entry_requires_name_and_advantage() {
+        // Both display fields are required on every batch row.
+        assert!(serde_json::from_str::<SponsorPackageUpdate>(
+            r#"{"id":"web-logo","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<SponsorPackageUpdate>(
+            r#"{"id":"web-logo","advantage":"Logo on website","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<SponsorPackageUpdate>(
+            r#"{"id":"web-logo","name":"Web Logo","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true}"#
+        )
+        .is_err());
+    }
+
+    #[test]
     fn update_entry_capacity_optional_max_required_reserved() {
         // Missing maxSponsors -> None (unlimited); missing reservedSponsors -> error.
         let missing_max: SponsorPackageUpdate = serde_json::from_str(
-            r#"{"id":"web-logo","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true}"#,
+            r#"{"id":"web-logo","name":"Web Logo","advantage":"Logo on website","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true}"#,
         )
         .unwrap();
         assert_eq!(missing_max.max_sponsors, None);
         let null_max: SponsorPackageUpdate = serde_json::from_str(
-            r#"{"id":"web-logo","priceIdr":2500000,"maxSponsors":null,"reservedSponsors":2,"isUnlocked":true}"#,
+            r#"{"id":"web-logo","name":"Web Logo","advantage":"Logo on website","priceIdr":2500000,"maxSponsors":null,"reservedSponsors":2,"isUnlocked":true}"#,
         )
         .unwrap();
         assert_eq!(null_max.max_sponsors, None);
         let set: SponsorPackageUpdate = serde_json::from_str(
-            r#"{"id":"web-logo","priceIdr":2500000,"maxSponsors":5,"reservedSponsors":2,"isUnlocked":true}"#,
+            r#"{"id":"web-logo","name":"Web Logo","advantage":"Logo on website","priceIdr":2500000,"maxSponsors":5,"reservedSponsors":2,"isUnlocked":true}"#,
         )
         .unwrap();
         assert_eq!(set.max_sponsors, Some(5));
@@ -331,17 +352,17 @@ mod tests {
     fn update_entry_threshold_optional_but_typed() {
         // Missing field -> None; explicit null -> None.
         let missing: SponsorPackageUpdate = serde_json::from_str(
-            r#"{"id":"web-logo","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true}"#,
+            r#"{"id":"web-logo","name":"Web Logo","advantage":"Logo on website","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true}"#,
         )
         .unwrap();
         assert_eq!(missing.minimum_spend_idr, None);
         let null: SponsorPackageUpdate = serde_json::from_str(
-            r#"{"id":"web-logo","priceIdr":2500000,"minimumSpendIdr":null,"reservedSponsors":0,"isUnlocked":true}"#,
+            r#"{"id":"web-logo","name":"Web Logo","advantage":"Logo on website","priceIdr":2500000,"minimumSpendIdr":null,"reservedSponsors":0,"isUnlocked":true}"#,
         )
         .unwrap();
         assert_eq!(null.minimum_spend_idr, None);
         let set: SponsorPackageUpdate = serde_json::from_str(
-            r#"{"id":"web-logo","priceIdr":2500000,"minimumSpendIdr":5000000,"reservedSponsors":0,"isUnlocked":true}"#,
+            r#"{"id":"web-logo","name":"Web Logo","advantage":"Logo on website","priceIdr":2500000,"minimumSpendIdr":5000000,"reservedSponsors":0,"isUnlocked":true}"#,
         )
         .unwrap();
         assert_eq!(set.minimum_spend_idr, Some(5_000_000));
@@ -356,12 +377,12 @@ mod tests {
     fn package_group_id_optional_both_directions() {
         // Missing group_id -> None (legacy D1 rows / old bodies).
         let missing: SponsorPackageUpdate = serde_json::from_str(
-            r#"{"id":"web-logo","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true}"#,
+            r#"{"id":"web-logo","name":"Web Logo","advantage":"Logo on website","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true}"#,
         )
         .unwrap();
         assert_eq!(missing.group_id, None);
         let set: SponsorPackageUpdate = serde_json::from_str(
-            r#"{"id":"web-logo","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true,"groupId":"digital-media"}"#,
+            r#"{"id":"web-logo","name":"Web Logo","advantage":"Logo on website","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true,"groupId":"digital-media"}"#,
         )
         .unwrap();
         assert_eq!(set.group_id.as_deref(), Some("digital-media"));

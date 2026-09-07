@@ -121,6 +121,9 @@ pub async fn handle_admin_update_sponsor_packages(
             UpdatePackagesError::OrderConflict => AppError::BadRequest(
                 "group displayOrder values must stay unique per event".to_string(),
             ),
+            UpdatePackagesError::DuplicateName(name) => AppError::Conflict(format!(
+                "sponsor package name '{name}' already exists for event {event_slug}"
+            )),
             UpdatePackagesError::Db(e) => AppError::Internal(e.to_string()),
         })?;
 
@@ -602,20 +605,32 @@ fn validate_event_slug(slug: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn validate_package_create(event_slug: &str, input: &SponsorPackageCreate) -> Result<(), AppError> {
-    validate_event_slug(event_slug)?;
-    let name = input.name.trim();
+/// Shared name/advantage bounds for package create and batch update rows.
+/// `context` names the offending row in batch errors, e.g. " for web-logo";
+/// pass "" for the single-entry create body.
+fn validate_package_display_fields(
+    name: &str,
+    advantage: &str,
+    context: &str,
+) -> Result<(), AppError> {
+    let name = name.trim();
     if name.is_empty() || name.len() > MAX_PACKAGE_NAME_LEN {
         return Err(AppError::BadRequest(format!(
-            "name must be 1..={MAX_PACKAGE_NAME_LEN} chars after trim"
+            "name{context} must be 1..={MAX_PACKAGE_NAME_LEN} chars after trim"
         )));
     }
-    let advantage = input.advantage.trim();
+    let advantage = advantage.trim();
     if advantage.is_empty() || advantage.len() > MAX_PACKAGE_ADVANTAGE_LEN {
         return Err(AppError::BadRequest(format!(
-            "advantage must be 1..={MAX_PACKAGE_ADVANTAGE_LEN} chars after trim"
+            "advantage{context} must be 1..={MAX_PACKAGE_ADVANTAGE_LEN} chars after trim"
         )));
     }
+    Ok(())
+}
+
+fn validate_package_create(event_slug: &str, input: &SponsorPackageCreate) -> Result<(), AppError> {
+    validate_event_slug(event_slug)?;
+    validate_package_display_fields(&input.name, &input.advantage, "")?;
     if input.group_id.trim().is_empty() {
         return Err(AppError::BadRequest(
             "groupId must not be empty".to_string(),
@@ -779,6 +794,7 @@ fn validate_batch(event_slug: &str, input: &SponsorPackageBatchUpdate) -> Result
         if !seen.insert(p.id.as_str()) {
             return Err(AppError::BadRequest(format!("duplicate package id: {id}")));
         }
+        validate_package_display_fields(&p.name, &p.advantage, &format!(" for {id}"))?;
         if !(MIN_PRICE_IDR..=MAX_PRICE_IDR).contains(&p.price_idr) {
             return Err(AppError::BadRequest(format!(
                 "priceIdr for {id} must be {MIN_PRICE_IDR}..={MAX_PRICE_IDR}"
@@ -1000,6 +1016,8 @@ mod tests {
     ) -> SponsorPackageUpdate {
         SponsorPackageUpdate {
             id: id.to_string(),
+            name: format!("Package {id}"),
+            advantage: "Advantage text".to_string(),
             price_idr,
             minimum_spend_idr,
             max_sponsors,
@@ -1095,6 +1113,36 @@ mod tests {
     }
 
     #[test]
+    fn package_update_field_boundaries() {
+        // Whitespace-only trims to empty; bounds are enforced after trim.
+        for (name, advantage) in [
+            ("   ".to_string(), "Advantage".to_string()),
+            ("x".repeat(81), "Advantage".to_string()),
+            ("Name".to_string(), "  ".to_string()),
+            ("Name".to_string(), "x".repeat(501)),
+        ] {
+            let mut pkg = update("web-logo", 3_000_000, true, None, None, 0);
+            pkg.name = name;
+            pkg.advantage = advantage;
+            let input = batch(vec![pkg]);
+            let err = validate_batch("community-day-2026", &input).unwrap_err();
+            assert_eq!(err.status_code(), 400);
+        }
+        // Exactly-at-limit values pass, including padded boundaries.
+        for (name, advantage) in [
+            ("x".repeat(80), "Advantage".to_string()),
+            ("Name".to_string(), "x".repeat(500)),
+            ("  Name  ".to_string(), "Advantage".to_string()),
+        ] {
+            let mut pkg = update("web-logo", 3_000_000, true, None, None, 0);
+            pkg.name = name;
+            pkg.advantage = advantage;
+            let input = batch(vec![pkg]);
+            assert!(validate_batch("community-day-2026", &input).is_ok());
+        }
+    }
+
+    #[test]
     fn accepts_null_and_boundary_thresholds() {
         for threshold in [None, Some(1), Some(1_000_000_000)] {
             let input = batch(vec![update(
@@ -1159,10 +1207,12 @@ mod tests {
 
     #[test]
     fn deserializes_camel_case_body() {
-        let body = r#"{"packages":[{"id":"web-logo","priceIdr":3000000,"minimumSpendIdr":7500000,"maxSponsors":5,"reservedSponsors":2,"isUnlocked":true}],"groups":[]}"#;
+        let body = r#"{"packages":[{"id":"web-logo","name":"Web Logo","advantage":"Logo on website","priceIdr":3000000,"minimumSpendIdr":7500000,"maxSponsors":5,"reservedSponsors":2,"isUnlocked":true}],"groups":[]}"#;
         let input: SponsorPackageBatchUpdate = serde_json::from_str(body).unwrap();
         assert_eq!(input.packages.len(), 1);
         assert_eq!(input.packages[0].price_idr, 3_000_000);
+        assert_eq!(input.packages[0].name, "Web Logo");
+        assert_eq!(input.packages[0].advantage, "Logo on website");
         assert_eq!(input.packages[0].minimum_spend_idr, Some(7_500_000));
         assert_eq!(input.packages[0].max_sponsors, Some(5));
         assert_eq!(input.packages[0].reserved_sponsors, 2);
@@ -1364,7 +1414,7 @@ mod tests {
     #[test]
     fn deserializes_combined_body() {
         let body = r#"{
-            "packages":[{"id":"tshirt","priceIdr":6000000,"reservedSponsors":2,"isUnlocked":true,"groupId":"onsite-physical"}],
+            "packages":[{"id":"tshirt","name":"T-Shirt","advantage":"T-Shirt branding","priceIdr":6000000,"reservedSponsors":2,"isUnlocked":true,"groupId":"onsite-physical"}],
             "groups":[{"id":"onsite-physical","label":"On-Site & Physical","displayOrder":1}]
         }"#;
         let input: SponsorPackageBatchUpdate = serde_json::from_str(body).unwrap();

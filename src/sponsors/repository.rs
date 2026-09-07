@@ -152,14 +152,33 @@ fn has_duplicate_final_threshold(existing: &[SponsorTier], updates: &[SponsorTie
     finals.values().any(|v| !seen.insert(*v))
 }
 
+/// Final package names (updates applied over current state) must stay
+/// unique per event, case-insensitively after trim — the same rule the
+/// create path enforces. Returns the first colliding normalized name.
+fn duplicate_final_name(
+    existing: &[SponsorPackage],
+    updates: &[SponsorPackageUpdate],
+) -> Option<String> {
+    let mut finals: HashMap<&str, String> = existing
+        .iter()
+        .map(|p| (p.id.as_str(), p.name.trim().to_ascii_lowercase()))
+        .collect();
+    for u in updates {
+        finals.insert(u.id.trim(), u.name.trim().to_ascii_lowercase());
+    }
+    let mut seen = HashSet::with_capacity(finals.len());
+    finals.values().find(|n| !seen.insert(n.as_str())).cloned()
+}
+
 /// Failure modes of a batch update. `UnknownIds`, `UnknownGroupIds`, and
-/// `OrderConflict` are reported before any statement runs, so no row is
-/// mutated.
+/// `OrderConflict` and `DuplicateName` are reported before any statement
+/// runs, so no row is mutated.
 #[derive(Debug)]
 pub enum UpdatePackagesError {
     UnknownIds(Vec<String>),
     UnknownGroupIds(Vec<String>),
     OrderConflict,
+    DuplicateName(String),
     Db(worker::Error),
 }
 
@@ -258,21 +277,6 @@ impl SponsorPackageRepository {
             .all()
             .await?;
         result.results::<SponsorPackage>()
-    }
-
-    /// Load the fixed set of package ids for an event.
-    async fn package_ids(&self, event_slug: &str) -> WorkerResult<HashSet<String>> {
-        let result = self
-            .db
-            .prepare("SELECT id FROM sponsor_packages WHERE event_slug = ?")
-            .bind(&[JsValue::from_str(event_slug)])?
-            .all()
-            .await?;
-        Ok(result
-            .results::<IdRow>()?
-            .into_iter()
-            .map(|r| r.id)
-            .collect())
     }
 
     /// Create a group for an event: server-generated id (slug + entropy,
@@ -446,7 +450,8 @@ impl SponsorPackageRepository {
             return Err(UpdatePackagesError::OrderConflict);
         }
 
-        let known = self.package_ids(event_slug).await?;
+        let existing_packages = self.list_packages(event_slug).await?;
+        let known: HashSet<&str> = existing_packages.iter().map(|p| p.id.as_str()).collect();
         let unknown: Vec<String> = package_updates
             .iter()
             .filter(|u| !known.contains(u.id.as_str()))
@@ -454,6 +459,12 @@ impl SponsorPackageRepository {
             .collect();
         if !unknown.is_empty() {
             return Err(UpdatePackagesError::UnknownIds(unknown));
+        }
+
+        // Final names (updates applied over current state) must stay unique
+        // per event, case-insensitively — same rule as the create path.
+        if let Some(name) = duplicate_final_name(&existing_packages, package_updates) {
+            return Err(UpdatePackagesError::DuplicateName(name));
         }
 
         let group_order_sql =
@@ -465,7 +476,9 @@ impl SponsorPackageRepository {
         "#;
         let package_sql = r#"
             UPDATE sponsor_packages
-            SET price_idr = ?,
+            SET name = ?,
+                advantage = ?,
+                price_idr = ?,
                 minimum_spend_idr = ?,
                 max_sponsors = ?,
                 reserved_sponsors = ?,
@@ -509,6 +522,8 @@ impl SponsorPackageRepository {
                 None => JsValue::NULL,
             };
             let stmt = self.db.prepare(package_sql).bind(&[
+                JsValue::from_str(u.name.trim()),
+                JsValue::from_str(u.advantage.trim()),
                 JsValue::from_f64(u.price_idr as f64),
                 minimum_spend_idr,
                 max_sponsors,
@@ -767,7 +782,10 @@ impl SponsorPackageRepository {
     }
 }
 
+/// Deserialization-only marker for existence checks; the id value itself is
+/// never read, only row presence.
 #[derive(Deserialize)]
+#[allow(dead_code)]
 struct IdRow {
     id: String,
 }
@@ -874,5 +892,86 @@ mod tests {
         assert!(!has_duplicate_final_threshold(&existing, &ok));
         // Untouched duplicate-free state stays clean.
         assert!(!has_duplicate_final_threshold(&existing, &[]));
+    }
+
+    fn package(id: &str, name: &str) -> SponsorPackage {
+        SponsorPackage {
+            id: id.to_string(),
+            event_slug: "community-day-2026".to_string(),
+            name: name.to_string(),
+            advantage: format!("{name} advantage"),
+            category: "digital".to_string(),
+            group_id: None,
+            price_idr: 1_000_000,
+            minimum_spend_idr: None,
+            max_sponsors: None,
+            reserved_sponsors: 0,
+            is_unlocked: true,
+            display_order: 1,
+            updated_at: "2026-01-01 00:00:00".to_string(),
+        }
+    }
+
+    fn package_update(id: &str, name: &str) -> SponsorPackageUpdate {
+        SponsorPackageUpdate {
+            id: id.to_string(),
+            name: name.to_string(),
+            advantage: format!("{name} advantage"),
+            price_idr: 1_000_000,
+            minimum_spend_idr: None,
+            max_sponsors: None,
+            reserved_sponsors: 0,
+            is_unlocked: true,
+            group_id: None,
+        }
+    }
+
+    #[test]
+    fn final_name_swap_is_unique() {
+        // Swapping the two names is fine: final values stay unique.
+        let existing = vec![
+            package("web-logo", "Web Logo"),
+            package("lanyard", "Lanyard"),
+        ];
+        let updates = vec![
+            package_update("web-logo", "Lanyard"),
+            package_update("lanyard", "Web Logo"),
+        ];
+        assert!(duplicate_final_name(&existing, &updates).is_none());
+    }
+
+    #[test]
+    fn final_name_collision_is_detected() {
+        let existing = vec![
+            package("web-logo", "Web Logo"),
+            package("lanyard", "Lanyard"),
+        ];
+        // Update targets a name still held by an untouched package.
+        assert_eq!(
+            duplicate_final_name(&existing, &[package_update("web-logo", "Lanyard")]),
+            Some("lanyard".to_string())
+        );
+        // Case-insensitive and trim-insensitive match against an untouched package.
+        assert_eq!(
+            duplicate_final_name(&existing, &[package_update("web-logo", "  LANYARD  ")]),
+            Some("lanyard".to_string())
+        );
+        // Duplicate inside the update body itself.
+        let dup_in_body = vec![
+            package_update("web-logo", "Fresh"),
+            package_update("lanyard", "fresh"),
+        ];
+        assert_eq!(
+            duplicate_final_name(&existing, &dup_in_body),
+            Some("fresh".to_string())
+        );
+        // Renaming every row to distinct names (even reusing old values the
+        // same batch vacates) stays clean.
+        let ok = vec![
+            package_update("web-logo", "Lanyard"),
+            package_update("lanyard", "Web Logo"),
+            package_update("tshirt", "T-Shirt"),
+        ];
+        assert!(duplicate_final_name(&existing, &ok).is_none());
     }
 }
