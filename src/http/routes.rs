@@ -296,6 +296,16 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             },
         )
         // ---------------------------------------------------------------
+        // PUT /api/admin/events/:eventSlug/sponsor-settings —
+        // update sponsor settings / exchange rate (admin-only)
+        // ---------------------------------------------------------------
+        .put_async(
+            "/api/admin/events/:eventSlug/sponsor-settings",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_update_sponsor_settings(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
         // CORS preflight for all /api/* routes
         // ---------------------------------------------------------------
         .options("/api/*rest", |_req, ctx| {
