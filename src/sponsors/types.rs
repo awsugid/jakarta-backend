@@ -188,7 +188,6 @@ pub struct SponsorPackagesResponse<'a> {
     pub tiers: &'a [SponsorTier],
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
