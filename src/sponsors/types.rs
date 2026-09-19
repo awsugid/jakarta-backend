@@ -166,12 +166,21 @@ pub struct SponsorPackageBatchUpdate {
     pub groups: Vec<SponsorPackageGroupUpdate>,
 }
 
+/// Body for PUT /api/admin/events/:eventSlug/sponsor-settings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SponsorSettingsUpdate {
+    pub usd_exchange_rate: i64,
+}
+
 /// Shared response shape of the public GET and admin PUT.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SponsorPackagesResponse<'a> {
     pub event_slug: &'a str,
     pub currency: &'a str,
+    #[serde(alias = "usd_exchange_rate")]
+    pub usd_exchange_rate: i64,
     /// Groups ordered by display_order; empty when the event has none seeded.
     pub groups: &'a [SponsorPackageGroup],
     pub packages: &'a [SponsorPackage],

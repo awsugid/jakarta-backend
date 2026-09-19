@@ -47,7 +47,12 @@ async fn extract_user_inner(req: &Request, config: &AppConfig) -> Result<AuthUse
     let headers = req.headers();
 
     if config.enable_debug_auth {
-        if let Ok(Some(email)) = headers.get("X-Debug-User-Email") {
+        let debug_email = headers
+            .get("x-debug-user-email")
+            .ok()
+            .flatten()
+            .or_else(|| headers.get("X-Debug-User-Email").ok().flatten());
+        if let Some(email) = debug_email {
             return Ok(AuthUser {
                 sub: format!("debug-{email}"),
                 email,

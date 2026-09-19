@@ -245,6 +245,42 @@ impl SponsorPackageRepository {
         Self { db }
     }
 
+    /// Get configured USD exchange rate (IDR per USD) for an event, defaulting to 17000.
+    pub async fn get_usd_exchange_rate(&self, event_slug: &str) -> WorkerResult<i64> {
+        let stmt = self.db.prepare(
+            "SELECT usd_exchange_rate FROM sponsor_settings WHERE event_slug = ?1 LIMIT 1",
+        );
+        let bound = stmt.bind(&[JsValue::from_str(event_slug)])?;
+        let result = bound.first::<serde_json::Value>(None).await?;
+        if let Some(row) = result {
+            if let Some(rate) = row.get("usd_exchange_rate").and_then(|v| v.as_i64()) {
+                return Ok(rate);
+            }
+        }
+        Ok(17000)
+    }
+
+    /// Upsert configured USD exchange rate (IDR per USD) for an event.
+    pub async fn update_usd_exchange_rate(
+        &self,
+        event_slug: &str,
+        usd_exchange_rate: i64,
+    ) -> WorkerResult<()> {
+        let stmt = self.db.prepare(
+            "INSERT INTO sponsor_settings (event_slug, usd_exchange_rate, updated_at)
+             VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(event_slug) DO UPDATE SET
+               usd_exchange_rate = excluded.usd_exchange_rate,
+               updated_at = datetime('now')",
+        );
+        let bound = stmt.bind(&[
+            JsValue::from_str(event_slug),
+            JsValue::from_f64(usd_exchange_rate as f64),
+        ])?;
+        bound.run().await?;
+        Ok(())
+    }
+
     /// List all groups for an event ordered by display_order, id.
     pub async fn list_groups(&self, event_slug: &str) -> WorkerResult<Vec<SponsorPackageGroup>> {
         let sql = r#"
