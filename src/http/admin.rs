@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use serde::{Deserialize, Serialize};
 use worker::*;
 
 use crate::auth::admin::require_admin;
@@ -10,7 +11,7 @@ use crate::http::errors::AppError;
 use crate::http::response::json_success_cors;
 use crate::storage::d1::FormRepository;
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminMe {
     email: String,
     name: Option<String>,
