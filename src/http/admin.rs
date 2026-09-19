@@ -45,7 +45,14 @@ struct AdminFormSummary {
     response_count: Option<u64>,
 }
 
-/// GET /api/admin/forms — list all active application_forms (all kinds).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUpdateFormStatusInput {
+    #[serde(alias = "is_active")]
+    pub is_active: bool,
+}
+
+/// GET /api/admin/forms — list all application_forms (all kinds, active and inactive).
 pub async fn handle_admin_forms(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
     let db_opt = ctx.d1("DB").ok();
@@ -58,7 +65,7 @@ pub async fn handle_admin_forms(req: Request, ctx: RouteContext<()>) -> Result<R
     let repo = FormRepository::new(db);
 
     let forms = repo
-        .list_forms(None)
+        .list_all_forms(None)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
@@ -76,6 +83,53 @@ pub async fn handle_admin_forms(req: Request, ctx: RouteContext<()>) -> Result<R
         .collect();
 
     let resp = json_success_cors(&items, &config.allowed_origins, origin.as_deref())?;
+    Ok(resp)
+}
+
+/// PUT /api/admin/forms/:kind/:slug — update form active status (open/closed) (admin-only).
+pub async fn handle_admin_update_form_status(
+    mut req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let kind = ctx
+        .param("kind")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: kind".to_string()))?;
+    let slug = ctx
+        .param("slug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: slug".to_string()))?;
+
+    let input: AdminUpdateFormStatusInput = req
+        .json()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = FormRepository::new(db);
+
+    let updated = repo
+        .update_form_active(kind, slug, input.is_active)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::NotFound(format!("Form {}/{} not found", kind, slug)))?;
+
+    let summary = AdminFormSummary {
+        kind: updated.kind,
+        slug: updated.slug,
+        title: updated.title,
+        description: updated.description,
+        survey_id: updated.formbricks_survey_id,
+        is_active: updated.is_active,
+        response_count: None,
+    };
+
+    let resp = json_success_cors(&summary, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
 }
 

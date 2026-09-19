@@ -119,6 +119,43 @@ impl FormRepository {
             .first::<ApplicationForm>(None)
             .await
     }
+
+    /// List all forms (both active and inactive), optionally filtered by kind.
+    pub async fn list_all_forms(&self, kind: Option<&str>) -> WorkerResult<Vec<ApplicationForm>> {
+        let result = match kind {
+            Some(k) => {
+                let sql = "SELECT * FROM application_forms WHERE kind = ? ORDER BY display_order, title";
+                self.db
+                    .prepare(sql)
+                    .bind(&[JsValue::from_str(k)])?
+                    .all()
+                    .await?
+            }
+            None => {
+                let sql = "SELECT * FROM application_forms ORDER BY kind, display_order, title";
+                self.db.prepare(sql).all().await?
+            }
+        };
+
+        result.results::<ApplicationForm>()
+    }
+
+    /// Update a form's active status (open/closed).
+    pub async fn update_form_active(
+        &self,
+        kind: &str,
+        slug: &str,
+        is_active: bool,
+    ) -> WorkerResult<Option<ApplicationForm>> {
+        let sql = "UPDATE application_forms SET is_active = ?, updated_at = datetime('now') WHERE kind = ? AND slug = ?";
+        let bound = self.db.prepare(sql).bind(&[
+            JsValue::from_f64(if is_active { 1.0 } else { 0.0 }),
+            JsValue::from_str(kind),
+            JsValue::from_str(slug),
+        ])?;
+        bound.run().await?;
+        self.get_form(kind, slug).await
+    }
 }
 
 /// Represents a row from the application_response_index table.
