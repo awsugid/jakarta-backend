@@ -80,7 +80,8 @@ impl FormRepository {
     pub async fn list_forms(&self, kind: Option<&str>) -> WorkerResult<Vec<ApplicationForm>> {
         let result = match kind {
             Some(k) => {
-                let sql = "SELECT * FROM application_forms WHERE kind = ? AND is_active = 1 ORDER BY display_order, title";
+                let sql =
+                    "SELECT * FROM application_forms WHERE kind = ? AND is_active = 1 ORDER BY display_order, title";
                 self.db
                     .prepare(sql)
                     .bind(&[JsValue::from_str(k)])?
@@ -88,7 +89,8 @@ impl FormRepository {
                     .await?
             }
             None => {
-                let sql = "SELECT * FROM application_forms WHERE is_active = 1 ORDER BY kind, display_order, title";
+                let sql =
+                    "SELECT * FROM application_forms WHERE is_active = 1 ORDER BY kind, display_order, title";
                 self.db.prepare(sql).all().await?
             }
         };

@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use worker::*;
 
@@ -10,7 +11,7 @@ use crate::http::errors::AppError;
 use crate::http::response::json_success_cors;
 use crate::storage::d1::FormRepository;
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminMe {
     email: String,
     name: Option<String>,
@@ -34,7 +35,7 @@ pub async fn handle_admin_me(req: Request, ctx: RouteContext<()>) -> Result<Resp
     Ok(resp)
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminFormSummary {
     kind: String,
     slug: String,
@@ -133,7 +134,7 @@ pub async fn handle_admin_update_form_status(
     Ok(resp)
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminFormbricksResponseSummary {
     id: String,
     survey_id: String,
@@ -145,7 +146,7 @@ struct AdminFormbricksResponseSummary {
     preview_answers: serde_json::Value,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminFormbricksResponseList {
     items: Vec<AdminFormbricksResponseSummary>,
     total: Option<u64>,
@@ -198,7 +199,7 @@ pub async fn handle_admin_responses(req: Request, ctx: RouteContext<()>) -> Resu
     Ok(resp)
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminAnswerItem {
     question_id: String,
     label: String,
@@ -207,12 +208,12 @@ struct AdminAnswerItem {
     value: serde_json::Value,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminResponseMetadata {
     contact_id: Option<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminFormbricksResponseDetail {
     id: String,
     survey_id: String,
