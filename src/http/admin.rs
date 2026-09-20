@@ -70,16 +70,26 @@ pub async fn handle_admin_forms(req: Request, ctx: RouteContext<()>) -> Result<R
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
+    // Batch-fetch response counts in a single query.
+    let form_ids: Vec<&str> = forms.iter().map(|f| f.id.as_str()).collect();
+    let counts = repo
+        .count_responses_by_form_ids(&form_ids)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
     let items: Vec<AdminFormSummary> = forms
         .into_iter()
-        .map(|f| AdminFormSummary {
-            kind: f.kind,
-            slug: f.slug,
-            title: f.title,
-            description: f.description,
-            survey_id: f.formbricks_survey_id,
-            is_active: f.is_active,
-            response_count: None,
+        .map(|f| {
+            let response_count = counts.get(&f.id).copied();
+            AdminFormSummary {
+                kind: f.kind,
+                slug: f.slug,
+                title: f.title,
+                description: f.description,
+                survey_id: f.formbricks_survey_id,
+                is_active: f.is_active,
+                response_count,
+            }
         })
         .collect();
 
@@ -120,6 +130,11 @@ pub async fn handle_admin_update_form_status(
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::NotFound(format!("Form {}/{} not found", kind, slug)))?;
 
+    let counts = repo
+        .count_responses_by_form_ids(&[updated.id.as_str()])
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
     let summary = AdminFormSummary {
         kind: updated.kind,
         slug: updated.slug,
@@ -127,7 +142,7 @@ pub async fn handle_admin_update_form_status(
         description: updated.description,
         survey_id: updated.formbricks_survey_id,
         is_active: updated.is_active,
-        response_count: None,
+        response_count: counts.get(&updated.id).copied(),
     };
 
     let resp = json_success_cors(&summary, &config.allowed_origins, origin.as_deref())?;
