@@ -98,6 +98,28 @@ impl FormRepository {
         result.results::<ApplicationForm>()
     }
 
+    /// List ALL forms regardless of is_active, optionally filtered by kind.
+    /// Used by admin endpoints that need to manage both active and inactive forms.
+    pub async fn list_all_forms(&self, kind: Option<&str>) -> WorkerResult<Vec<ApplicationForm>> {
+        let result = match kind {
+            Some(k) => {
+                let sql =
+                    "SELECT * FROM application_forms WHERE kind = ? ORDER BY display_order, title";
+                self.db
+                    .prepare(sql)
+                    .bind(&[JsValue::from_str(k)])?
+                    .all()
+                    .await?
+            }
+            None => {
+                let sql = "SELECT * FROM application_forms ORDER BY kind, display_order, title";
+                self.db.prepare(sql).all().await?
+            }
+        };
+
+        result.results::<ApplicationForm>()
+    }
+
     /// Get a form by its FormBricks survey ID.
     #[allow(dead_code)]
     pub async fn get_form_by_survey_id(
@@ -122,25 +144,36 @@ impl FormRepository {
             .await
     }
 
-    /// List all forms (both active and inactive), optionally filtered by kind.
-    pub async fn list_all_forms(&self, kind: Option<&str>) -> WorkerResult<Vec<ApplicationForm>> {
-        let result = match kind {
-            Some(k) => {
-                let sql =
-                    "SELECT * FROM application_forms WHERE kind = ? ORDER BY display_order, title";
-                self.db
-                    .prepare(sql)
-                    .bind(&[JsValue::from_str(k)])?
-                    .all()
-                    .await?
-            }
-            None => {
-                let sql = "SELECT * FROM application_forms ORDER BY kind, display_order, title";
-                self.db.prepare(sql).all().await?
-            }
-        };
+    /// Count active responses per form_id for the given set of form IDs.
+    /// Returns a map of form_id → count.
+    pub async fn count_responses_by_form_ids(
+        &self,
+        form_ids: &[&str],
+    ) -> WorkerResult<std::collections::HashMap<String, u64>> {
+        if form_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
 
-        result.results::<ApplicationForm>()
+        let placeholders = vec!["?"; form_ids.len()].join(", ");
+        let sql = format!(
+            "SELECT form_id, COUNT(*) AS cnt \
+             FROM application_response_index \
+             WHERE status = 'active' AND form_id IN ({}) \
+             GROUP BY form_id",
+            placeholders
+        );
+
+        #[derive(serde::Deserialize)]
+        struct Row {
+            form_id: String,
+            cnt: u64,
+        }
+
+        let bind_vals: Vec<JsValue> = form_ids.iter().map(|id| JsValue::from_str(id)).collect();
+        let result = self.db.prepare(&sql).bind(&bind_vals)?.all().await?;
+        let rows = result.results::<Row>()?;
+
+        Ok(rows.into_iter().map(|r| (r.form_id, r.cnt)).collect())
     }
 
     /// Update a form's active status (open/closed).
