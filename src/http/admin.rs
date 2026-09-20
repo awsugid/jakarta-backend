@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use worker::*;
 
@@ -10,7 +11,7 @@ use crate::http::errors::AppError;
 use crate::http::response::json_success_cors;
 use crate::storage::d1::FormRepository;
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminMe {
     email: String,
     name: Option<String>,
@@ -34,7 +35,7 @@ pub async fn handle_admin_me(req: Request, ctx: RouteContext<()>) -> Result<Resp
     Ok(resp)
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminFormSummary {
     kind: String,
     slug: String,
@@ -45,7 +46,14 @@ struct AdminFormSummary {
     response_count: Option<u64>,
 }
 
-/// GET /api/admin/forms — list all active application_forms (all kinds).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUpdateFormStatusInput {
+    #[serde(alias = "is_active")]
+    pub is_active: bool,
+}
+
+/// GET /api/admin/forms — list all application_forms (all kinds, active and inactive).
 pub async fn handle_admin_forms(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
     let db_opt = ctx.d1("DB").ok();
@@ -58,7 +66,7 @@ pub async fn handle_admin_forms(req: Request, ctx: RouteContext<()>) -> Result<R
     let repo = FormRepository::new(db);
 
     let forms = repo
-        .list_forms(None)
+        .list_all_forms(None)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
@@ -79,7 +87,7 @@ pub async fn handle_admin_forms(req: Request, ctx: RouteContext<()>) -> Result<R
     Ok(resp)
 }
 
-/// PUT /api/admin/forms/:kind/:slug — toggle `is_active` for a volunteer/speaker form.
+/// PUT /api/admin/forms/:kind/:slug — update form active status (open/closed) (admin-only).
 pub async fn handle_admin_update_form_status(
     mut req: Request,
     ctx: RouteContext<()>,
@@ -96,11 +104,7 @@ pub async fn handle_admin_update_form_status(
         .param("slug")
         .ok_or_else(|| AppError::BadRequest("Missing path parameter: slug".to_string()))?;
 
-    #[derive(serde::Deserialize)]
-    struct UpdateBody {
-        is_active: bool,
-    }
-    let body: UpdateBody = req
+    let input: AdminUpdateFormStatusInput = req
         .json()
         .await
         .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
@@ -110,19 +114,19 @@ pub async fn handle_admin_update_form_status(
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let repo = FormRepository::new(db);
 
-    let form = repo
-        .update_form_status(kind, slug, body.is_active)
+    let updated = repo
+        .update_form_active(kind, slug, input.is_active)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?
-        .ok_or_else(|| AppError::NotFound(format!("Form {kind}/{slug} not found")))?;
+        .ok_or_else(|| AppError::NotFound(format!("Form {}/{} not found", kind, slug)))?;
 
     let summary = AdminFormSummary {
-        kind: form.kind,
-        slug: form.slug,
-        title: form.title,
-        description: form.description,
-        survey_id: form.formbricks_survey_id,
-        is_active: form.is_active,
+        kind: updated.kind,
+        slug: updated.slug,
+        title: updated.title,
+        description: updated.description,
+        survey_id: updated.formbricks_survey_id,
+        is_active: updated.is_active,
         response_count: None,
     };
 
@@ -130,7 +134,7 @@ pub async fn handle_admin_update_form_status(
     Ok(resp)
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminFormbricksResponseSummary {
     id: String,
     survey_id: String,
@@ -142,7 +146,7 @@ struct AdminFormbricksResponseSummary {
     preview_answers: serde_json::Value,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminFormbricksResponseList {
     items: Vec<AdminFormbricksResponseSummary>,
     total: Option<u64>,
@@ -195,7 +199,7 @@ pub async fn handle_admin_responses(req: Request, ctx: RouteContext<()>) -> Resu
     Ok(resp)
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminAnswerItem {
     question_id: String,
     label: String,
@@ -204,12 +208,12 @@ struct AdminAnswerItem {
     value: serde_json::Value,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminResponseMetadata {
     contact_id: Option<String>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(Serialize)]
 struct AdminFormbricksResponseDetail {
     id: String,
     survey_id: String,

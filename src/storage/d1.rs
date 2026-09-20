@@ -80,7 +80,8 @@ impl FormRepository {
     pub async fn list_forms(&self, kind: Option<&str>) -> WorkerResult<Vec<ApplicationForm>> {
         let result = match kind {
             Some(k) => {
-                let sql = "SELECT * FROM application_forms WHERE kind = ? AND is_active = 1 ORDER BY display_order, title";
+                let sql =
+                    "SELECT * FROM application_forms WHERE kind = ? AND is_active = 1 ORDER BY display_order, title";
                 self.db
                     .prepare(sql)
                     .bind(&[JsValue::from_str(k)])?
@@ -88,7 +89,8 @@ impl FormRepository {
                     .await?
             }
             None => {
-                let sql = "SELECT * FROM application_forms WHERE is_active = 1 ORDER BY kind, display_order, title";
+                let sql =
+                    "SELECT * FROM application_forms WHERE is_active = 1 ORDER BY kind, display_order, title";
                 self.db.prepare(sql).all().await?
             }
         };
@@ -120,26 +122,42 @@ impl FormRepository {
             .await
     }
 
-    /// Update `is_active` for a form identified by kind + slug.
-    /// Returns the updated row, or `None` if no matching form exists.
-    pub async fn update_form_status(
+    /// List all forms (both active and inactive), optionally filtered by kind.
+    pub async fn list_all_forms(&self, kind: Option<&str>) -> WorkerResult<Vec<ApplicationForm>> {
+        let result = match kind {
+            Some(k) => {
+                let sql =
+                    "SELECT * FROM application_forms WHERE kind = ? ORDER BY display_order, title";
+                self.db
+                    .prepare(sql)
+                    .bind(&[JsValue::from_str(k)])?
+                    .all()
+                    .await?
+            }
+            None => {
+                let sql = "SELECT * FROM application_forms ORDER BY kind, display_order, title";
+                self.db.prepare(sql).all().await?
+            }
+        };
+
+        result.results::<ApplicationForm>()
+    }
+
+    /// Update a form's active status (open/closed).
+    pub async fn update_form_active(
         &self,
         kind: &str,
         slug: &str,
         is_active: bool,
     ) -> WorkerResult<Option<ApplicationForm>> {
-        let update_sql =
+        let sql =
             "UPDATE application_forms SET is_active = ?, updated_at = datetime('now') WHERE kind = ? AND slug = ?";
-        self.db
-            .prepare(update_sql)
-            .bind(&[
-                JsValue::from_bool(is_active),
-                JsValue::from_str(kind),
-                JsValue::from_str(slug),
-            ])?
-            .run()
-            .await?;
-
+        let bound = self.db.prepare(sql).bind(&[
+            JsValue::from_f64(if is_active { 1.0 } else { 0.0 }),
+            JsValue::from_str(kind),
+            JsValue::from_str(slug),
+        ])?;
+        bound.run().await?;
         self.get_form(kind, slug).await
     }
 }
