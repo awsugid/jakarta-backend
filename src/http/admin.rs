@@ -79,6 +79,57 @@ pub async fn handle_admin_forms(req: Request, ctx: RouteContext<()>) -> Result<R
     Ok(resp)
 }
 
+/// PUT /api/admin/forms/:kind/:slug — toggle `is_active` for a volunteer/speaker form.
+pub async fn handle_admin_update_form_status(
+    mut req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let kind = ctx
+        .param("kind")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: kind".to_string()))?;
+    let slug = ctx
+        .param("slug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: slug".to_string()))?;
+
+    #[derive(serde::Deserialize)]
+    struct UpdateBody {
+        is_active: bool,
+    }
+    let body: UpdateBody = req
+        .json()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = FormRepository::new(db);
+
+    let form = repo
+        .update_form_status(kind, slug, body.is_active)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?
+        .ok_or_else(|| AppError::NotFound(format!("Form {kind}/{slug} not found")))?;
+
+    let summary = AdminFormSummary {
+        kind: form.kind,
+        slug: form.slug,
+        title: form.title,
+        description: form.description,
+        survey_id: form.formbricks_survey_id,
+        is_active: form.is_active,
+        response_count: None,
+    };
+
+    let resp = json_success_cors(&summary, &config.allowed_origins, origin.as_deref())?;
+    Ok(resp)
+}
+
 #[derive(serde::Serialize)]
 struct AdminFormbricksResponseSummary {
     id: String,

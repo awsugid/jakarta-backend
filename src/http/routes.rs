@@ -134,6 +134,9 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
         .get_async("/api/admin/forms", |req, ctx| async move {
             crate::http::admin::handle_admin_forms(req, ctx).await
         })
+        .put_async("/api/admin/forms/:kind/:slug", |req, ctx| async move {
+            crate::http::admin::handle_admin_update_form_status(req, ctx).await
+        })
         .get_async("/api/admin/formbricks/responses", |req, ctx| async move {
             crate::http::admin::handle_admin_responses(req, ctx).await
         })

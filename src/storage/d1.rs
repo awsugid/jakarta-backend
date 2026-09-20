@@ -119,6 +119,29 @@ impl FormRepository {
             .first::<ApplicationForm>(None)
             .await
     }
+
+    /// Update `is_active` for a form identified by kind + slug.
+    /// Returns the updated row, or `None` if no matching form exists.
+    pub async fn update_form_status(
+        &self,
+        kind: &str,
+        slug: &str,
+        is_active: bool,
+    ) -> WorkerResult<Option<ApplicationForm>> {
+        let update_sql =
+            "UPDATE application_forms SET is_active = ?, updated_at = datetime('now') WHERE kind = ? AND slug = ?";
+        self.db
+            .prepare(update_sql)
+            .bind(&[
+                JsValue::from_bool(is_active),
+                JsValue::from_str(kind),
+                JsValue::from_str(slug),
+            ])?
+            .run()
+            .await?;
+
+        self.get_form(kind, slug).await
+    }
 }
 
 /// Represents a row from the application_response_index table.

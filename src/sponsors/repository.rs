@@ -281,7 +281,6 @@ impl SponsorPackageRepository {
         Ok(())
     }
 
-
     /// List all groups for an event ordered by display_order, id.
     pub async fn list_groups(&self, event_slug: &str) -> WorkerResult<Vec<SponsorPackageGroup>> {
         let sql = r#"
