@@ -144,6 +144,10 @@ pub struct SponsorTier {
     /// batch update can use temporary negative values during swaps).
     #[serde(alias = "threshold_idr")]
     pub threshold_idr: i64,
+    /// Manual USD threshold override; null = use the event's
+    /// usd_exchange_rate estimate. Cents allowed (REAL, e.g. 2500.5).
+    #[serde(alias = "threshold_usd")]
+    pub threshold_usd: Option<f64>,
     /// One of the ACCENT_ALLOWLIST values; constrained by the table CHECK.
     pub accent: String,
     #[serde(alias = "updated_at")]
@@ -157,6 +161,9 @@ pub struct SponsorTier {
 pub struct SponsorTierCreate {
     pub label: String,
     pub threshold_idr: i64,
+    /// Optional manual USD threshold override in 0.01..=1_000_000; omitted
+    /// or null = no override (use the exchange-rate estimate).
+    pub threshold_usd: Option<f64>,
     pub accent: String,
 }
 
@@ -169,6 +176,11 @@ pub struct SponsorTierUpdate {
     pub id: String,
     pub label: String,
     pub threshold_idr: i64,
+    /// Manual USD threshold override in 0.01..=1_000_000. Triple state via
+    /// double_option: omitted = leave unchanged, null = clear (fall back to
+    /// the exchange-rate estimate), number = set.
+    #[serde(default, deserialize_with = "double_option")]
+    pub threshold_usd: Option<Option<f64>>,
     pub accent: String,
 }
 
@@ -610,19 +622,32 @@ mod tests {
     fn sponsor_tier_row_snake_in_camel_out() {
         // snake_case D1 row deserializes via aliases.
         let row: SponsorTier = serde_json::from_str(
-            r#"{"id":"platinum","event_slug":"community-day-2026","label":"Platinum","threshold_idr":40000000,"accent":"platinum","updated_at":"2026-01-01 00:00:00"}"#,
+            r#"{"id":"platinum","event_slug":"community-day-2026","label":"Platinum","threshold_idr":40000000,"threshold_usd":2500.5,"accent":"platinum","updated_at":"2026-01-01 00:00:00"}"#,
         )
         .unwrap();
         assert_eq!(row.id, "platinum");
         assert_eq!(row.event_slug, "community-day-2026");
         assert_eq!(row.threshold_idr, 40_000_000);
+        assert_eq!(row.threshold_usd, Some(2500.5));
         assert_eq!(row.accent, "platinum");
         // Serialize side is camelCase for API clients.
         let json = serde_json::to_value(&row).unwrap();
         assert_eq!(json["thresholdIdr"], 40_000_000);
+        assert_eq!(json["thresholdUsd"], 2500.5);
         assert_eq!(json["eventSlug"], "community-day-2026");
         assert_eq!(json["updatedAt"], "2026-01-01 00:00:00");
         assert!(json.get("threshold_idr").is_none());
+        assert!(json.get("threshold_usd").is_none());
+    }
+
+    #[test]
+    fn tier_row_without_threshold_usd_deserializes() {
+        // Rows written before migration 0014 lack the column.
+        let row: SponsorTier = serde_json::from_str(
+            r#"{"id":"gold","event_slug":"community-day-2026","label":"Gold","threshold_idr":25000000,"accent":"gold","updated_at":"2026-01-01 00:00:00"}"#,
+        )
+        .unwrap();
+        assert_eq!(row.threshold_usd, None);
     }
 
     #[test]
@@ -641,6 +666,45 @@ mod tests {
         .is_err());
         assert!(serde_json::from_str::<SponsorTierCreate>(
             r#"{"label":"P","thresholdIdr":10,"accent":7}"#
+        )
+        .is_err());
+        // thresholdUsd is optional on create: omitted/null -> None.
+        assert!(serde_json::from_str::<SponsorTierCreate>(
+            r#"{"label":"P","thresholdIdr":10,"accent":"gold","thresholdUsd":null}"#
+        )
+        .unwrap()
+        .threshold_usd
+        .is_none());
+        assert_eq!(
+            serde_json::from_str::<SponsorTierCreate>(
+                r#"{"label":"P","thresholdIdr":10,"accent":"gold","thresholdUsd":2500.5}"#
+            )
+            .unwrap()
+            .threshold_usd,
+            Some(2500.5)
+        );
+    }
+
+    #[test]
+    fn tier_update_threshold_usd_triple_state() {
+        let base =
+            r#"{"id":"platinum","label":"Platinum","thresholdIdr":40000000,"accent":"platinum"}"#;
+        // Omitted -> None (leave unchanged).
+        let omitted: SponsorTierUpdate = serde_json::from_str(base).unwrap();
+        assert_eq!(omitted.threshold_usd, None);
+        // Explicit null -> Some(None) (clear the override).
+        let cleared: SponsorTierUpdate =
+            serde_json::from_str(&base.replace("\"accent\"", "\"thresholdUsd\":null,\"accent\""))
+                .unwrap();
+        assert_eq!(cleared.threshold_usd, Some(None));
+        // Number -> Some(Some(v)); cents allowed.
+        let set: SponsorTierUpdate =
+            serde_json::from_str(&base.replace("\"accent\"", "\"thresholdUsd\":2500.5,\"accent\""))
+                .unwrap();
+        assert_eq!(set.threshold_usd, Some(Some(2500.5)));
+        // Non-number types are rejected.
+        assert!(serde_json::from_str::<SponsorTierUpdate>(
+            &base.replace("\"accent\"", "\"thresholdUsd\":\"2500\",\"accent\"")
         )
         .is_err());
     }

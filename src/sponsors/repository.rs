@@ -676,7 +676,7 @@ impl SponsorPackageRepository {
     /// IS threshold order; there is deliberately no display_order).
     pub async fn list_tiers(&self, event_slug: &str) -> WorkerResult<Vec<SponsorTier>> {
         let sql = r#"
-            SELECT id, event_slug, label, threshold_idr, accent, updated_at
+            SELECT id, event_slug, label, threshold_idr, threshold_usd, accent, updated_at
             FROM sponsor_tiers
             WHERE event_slug = ?
             ORDER BY threshold_idr DESC
@@ -698,6 +698,7 @@ impl SponsorPackageRepository {
         event_slug: &str,
         label: &str,
         threshold_idr: i64,
+        threshold_usd: Option<f64>,
         accent: &str,
     ) -> Result<(String, Vec<SponsorTier>), CreateTierError> {
         let existing = self.list_tiers(event_slug).await?;
@@ -722,8 +723,8 @@ impl SponsorPackageRepository {
             .prepare(
                 r#"
                 INSERT INTO sponsor_tiers
-                    (id, event_slug, label, threshold_idr, accent, updated_at)
-                VALUES (?, ?, ?, ?, ?, datetime('now'))
+                    (id, event_slug, label, threshold_idr, threshold_usd, accent, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
             "#,
             )
             .bind(&[
@@ -731,6 +732,9 @@ impl SponsorPackageRepository {
                 JsValue::from_str(event_slug),
                 JsValue::from_str(label),
                 JsValue::from_f64(threshold_idr as f64),
+                threshold_usd
+                    .map(JsValue::from_f64)
+                    .unwrap_or(JsValue::NULL),
                 JsValue::from_str(accent),
             ])?
             .run()
@@ -784,7 +788,7 @@ impl SponsorPackageRepository {
         let temp_sql = "UPDATE sponsor_tiers SET threshold_idr = ? WHERE event_slug = ? AND id = ?";
         let final_sql = r#"
             UPDATE sponsor_tiers
-            SET label = ?, threshold_idr = ?, accent = ?, updated_at = datetime('now')
+            SET label = ?, threshold_idr = ?, threshold_usd = ?, accent = ?, updated_at = datetime('now')
             WHERE event_slug = ? AND id = ?
         "#;
 
@@ -800,9 +804,24 @@ impl SponsorPackageRepository {
         }
         // Phase two: final positive thresholds, labels, and accents.
         for t in tier_updates {
+            // thresholdUsd is triple-state: omitted keeps the row's current
+            // value, null clears, number sets.
+            let existing_threshold_usd = existing
+                .iter()
+                .find(|tier| tier.id == t.id.trim())
+                .and_then(|tier| tier.threshold_usd);
+            let threshold_usd = match t.threshold_usd {
+                Some(requested) => requested,
+                None => existing_threshold_usd,
+            };
+            let threshold_usd = match threshold_usd {
+                Some(v) => JsValue::from_f64(v),
+                None => JsValue::NULL,
+            };
             statements.push(self.db.prepare(final_sql).bind(&[
                 JsValue::from_str(t.label.trim()),
                 JsValue::from_f64(t.threshold_idr as f64),
+                threshold_usd,
                 JsValue::from_str(&t.accent),
                 JsValue::from_str(event_slug),
                 JsValue::from_str(t.id.trim()),
@@ -899,6 +918,7 @@ mod tests {
             event_slug: "community-day-2026".to_string(),
             label: format!("Tier {id}"),
             threshold_idr,
+            threshold_usd: None,
             accent: "default".to_string(),
             updated_at: "2026-01-01 00:00:00".to_string(),
         }
@@ -909,6 +929,7 @@ mod tests {
             id: id.to_string(),
             label: format!("Tier {id}"),
             threshold_idr,
+            threshold_usd: None,
             accent: "default".to_string(),
         }
     }

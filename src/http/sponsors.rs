@@ -454,7 +454,13 @@ pub async fn handle_admin_create_sponsor_tier(
     let repo = SponsorPackageRepository::new(db);
 
     let (tier_id, tiers) = repo
-        .create_tier(event_slug, label, input.threshold_idr, &input.accent)
+        .create_tier(
+            event_slug,
+            label,
+            input.threshold_idr,
+            input.threshold_usd,
+            &input.accent,
+        )
         .await
         .map_err(|e| match e {
             CreateTierError::DuplicateLabel => AppError::Conflict(format!(
@@ -743,12 +749,13 @@ fn validate_package_display_fields(
     Ok(())
 }
 
-/// Shared manual USD price override bounds: positive finite f64, cents
-/// allowed (0.01), capped at a sensible 1,000,000. Mirrors the table CHECK.
-fn validate_price_usd(price_usd: &f64, context: &str) -> Result<(), AppError> {
-    if !price_usd.is_finite() || !(MIN_PRICE_USD..=MAX_PRICE_USD).contains(price_usd) {
+/// Shared manual USD amount bounds (priceUsd, thresholdUsd): positive
+/// finite f64, cents allowed (0.01), capped at a sensible 1,000,000.
+/// Mirrors the table CHECKs.
+fn validate_usd_amount(field: &str, value: &f64, context: &str) -> Result<(), AppError> {
+    if !value.is_finite() || !(MIN_PRICE_USD..=MAX_PRICE_USD).contains(value) {
         return Err(AppError::BadRequest(format!(
-            "priceUsd{context} must be null or a finite {MIN_PRICE_USD}..={MAX_PRICE_USD} amount"
+            "{field}{context} must be null or a finite {MIN_PRICE_USD}..={MAX_PRICE_USD} amount"
         )));
     }
     Ok(())
@@ -768,7 +775,7 @@ fn validate_package_create(event_slug: &str, input: &SponsorPackageCreate) -> Re
         )));
     }
     if let Some(price_usd) = input.price_usd {
-        validate_price_usd(&price_usd, "")?;
+        validate_usd_amount("priceUsd", &price_usd, "")?;
     }
     Ok(())
 }
@@ -790,6 +797,9 @@ fn validate_group_create(
 fn validate_tier_create(event_slug: &str, input: &SponsorTierCreate) -> Result<(), AppError> {
     validate_event_slug(event_slug)?;
     validate_tier_fields(&input.label, input.threshold_idr, &input.accent)?;
+    if let Some(threshold_usd) = input.threshold_usd {
+        validate_usd_amount("thresholdUsd", &threshold_usd, "")?;
+    }
     Ok(())
 }
 
@@ -821,6 +831,9 @@ fn validate_tier_batch(event_slug: &str, input: &SponsorTierBatchUpdate) -> Resu
             return Err(AppError::BadRequest(format!("duplicate tier id: {id}")));
         }
         validate_tier_fields(&t.label, t.threshold_idr, &t.accent)?;
+        if let Some(Some(threshold_usd)) = &t.threshold_usd {
+            validate_usd_amount("thresholdUsd", threshold_usd, &format!(" for {id}"))?;
+        }
         if !seen_thresholds.insert(t.threshold_idr) {
             return Err(AppError::BadRequest(format!(
                 "duplicate tier thresholdIdr: {}",
@@ -930,7 +943,7 @@ fn validate_batch(event_slug: &str, input: &SponsorPackageBatchUpdate) -> Result
             )));
         }
         if let Some(Some(price_usd)) = &p.price_usd {
-            validate_price_usd(price_usd, &format!(" for {id}"))?;
+            validate_usd_amount("priceUsd", price_usd, &format!(" for {id}"))?;
         }
         if let Some(minimum_spend_idr) = p.minimum_spend_idr {
             if !(MIN_PRICE_IDR..=MAX_PRICE_IDR).contains(&minimum_spend_idr) {
@@ -1623,6 +1636,7 @@ mod tests {
         SponsorTierCreate {
             label: label.to_string(),
             threshold_idr,
+            threshold_usd: None,
             accent: accent.to_string(),
         }
     }
@@ -1637,6 +1651,7 @@ mod tests {
             id: id.to_string(),
             label: label.to_string(),
             threshold_idr,
+            threshold_usd: None,
             accent: accent.to_string(),
         }
     }
@@ -1691,6 +1706,22 @@ mod tests {
                 err.message().contains("thresholdIdr"),
                 "threshold {threshold}"
             );
+        }
+    }
+
+    #[test]
+    fn tier_create_threshold_usd_bounds() {
+        let mut ok = tier_create("Platinum", 40_000_000, "platinum");
+        ok.threshold_usd = Some(2500.5);
+        assert!(validate_tier_create("community-day-2026", &ok).is_ok());
+        ok.threshold_usd = None;
+        assert!(validate_tier_create("community-day-2026", &ok).is_ok());
+        for bad in [0.0, -1.0, 0.009, 1_000_000.01, f64::NAN, f64::INFINITY] {
+            let mut input = tier_create("Platinum", 40_000_000, "platinum");
+            input.threshold_usd = Some(bad);
+            let err = validate_tier_create("community-day-2026", &input).unwrap_err();
+            assert_eq!(err.status_code(), 400);
+            assert!(err.message().contains("thresholdUsd"), "thresholdUsd {bad}");
         }
     }
 
@@ -1761,6 +1792,35 @@ mod tests {
         ]);
         let err = validate_tier_batch("community-day-2026", &dup_thresholds).unwrap_err();
         assert!(err.message().contains("duplicate tier thresholdIdr"));
+    }
+
+    #[test]
+    fn tier_batch_threshold_usd_triple_state_and_bounds() {
+        // Triple state: omitted (None) and explicit null (Some(None)) are
+        // both valid without a range check; values are bounded.
+        for threshold_usd in [
+            None,
+            Some(None),
+            Some(Some(0.01)),
+            Some(Some(2500.5)),
+            Some(Some(1_000_000.0)),
+        ] {
+            let mut entry = tier_update("platinum", "Platinum", 40_000_000, "platinum");
+            entry.threshold_usd = threshold_usd;
+            let input = tier_batch(vec![entry]);
+            assert!(
+                validate_tier_batch("community-day-2026", &input).is_ok(),
+                "thresholdUsd {threshold_usd:?}"
+            );
+        }
+        for bad in [0.0, -1.0, 0.009, 1_000_000.01, f64::NAN, f64::INFINITY] {
+            let mut entry = tier_update("platinum", "Platinum", 40_000_000, "platinum");
+            entry.threshold_usd = Some(Some(bad));
+            let input = tier_batch(vec![entry]);
+            let err = validate_tier_batch("community-day-2026", &input).unwrap_err();
+            assert_eq!(err.status_code(), 400);
+            assert!(err.message().contains("thresholdUsd"), "thresholdUsd {bad}");
+        }
     }
 
     #[test]
