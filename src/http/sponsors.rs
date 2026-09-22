@@ -929,10 +929,8 @@ fn validate_batch(event_slug: &str, input: &SponsorPackageBatchUpdate) -> Result
                 "priceIdr for {id} must be {MIN_PRICE_IDR}..={MAX_PRICE_IDR}"
             )));
         }
-        if let Some(requested) = &p.price_usd {
-            if let Some(price_usd) = requested {
-                validate_price_usd(price_usd, &format!(" for {id}"))?;
-            }
+        if let Some(Some(price_usd)) = &p.price_usd {
+            validate_price_usd(price_usd, &format!(" for {id}"))?;
         }
         if let Some(minimum_spend_idr) = p.minimum_spend_idr {
             if !(MIN_PRICE_IDR..=MAX_PRICE_IDR).contains(&minimum_spend_idr) {
