@@ -20,6 +20,8 @@ const MAX_PACKAGES_PER_UPDATE: usize = 50;
 const MAX_GROUPS_PER_UPDATE: usize = 20;
 const MIN_PRICE_IDR: i64 = 1;
 const MAX_PRICE_IDR: i64 = 1_000_000_000;
+const MIN_PRICE_USD: f64 = 0.01;
+const MAX_PRICE_USD: f64 = 1_000_000.0;
 const MAX_SPONSORS: i64 = 10_000;
 const MAX_GROUP_LABEL_LEN: usize = 80;
 const MAX_PACKAGE_NAME_LEN: usize = 80;
@@ -258,7 +260,7 @@ pub async fn handle_admin_create_sponsor_package(
     let repo = SponsorPackageRepository::new(db);
 
     let (package_id, groups, packages) = repo
-        .create_package(event_slug, name, advantage, group_id, input.price_idr)
+        .create_package(event_slug, name, advantage, group_id, input.price_idr, input.price_usd)
         .await
         .map_err(|e| match e {
             CreatePackageError::DuplicateName => AppError::Conflict(format!(
@@ -741,6 +743,17 @@ fn validate_package_display_fields(
     Ok(())
 }
 
+/// Shared manual USD price override bounds: positive finite f64, cents
+/// allowed (0.01), capped at a sensible 1,000,000. Mirrors the table CHECK.
+fn validate_price_usd(price_usd: &f64, context: &str) -> Result<(), AppError> {
+    if !price_usd.is_finite() || !(MIN_PRICE_USD..=MAX_PRICE_USD).contains(price_usd) {
+        return Err(AppError::BadRequest(format!(
+            "priceUsd{context} must be null or a finite {MIN_PRICE_USD}..={MAX_PRICE_USD} amount"
+        )));
+    }
+    Ok(())
+}
+
 fn validate_package_create(event_slug: &str, input: &SponsorPackageCreate) -> Result<(), AppError> {
     validate_event_slug(event_slug)?;
     validate_package_display_fields(&input.name, &input.advantage, "")?;
@@ -753,6 +766,9 @@ fn validate_package_create(event_slug: &str, input: &SponsorPackageCreate) -> Re
         return Err(AppError::BadRequest(format!(
             "priceIdr must be {MIN_PRICE_IDR}..={MAX_PRICE_IDR}"
         )));
+    }
+    if let Some(price_usd) = input.price_usd {
+        validate_price_usd(&price_usd, "")?;
     }
     Ok(())
 }
@@ -913,6 +929,11 @@ fn validate_batch(event_slug: &str, input: &SponsorPackageBatchUpdate) -> Result
                 "priceIdr for {id} must be {MIN_PRICE_IDR}..={MAX_PRICE_IDR}"
             )));
         }
+        if let Some(requested) = &p.price_usd {
+            if let Some(price_usd) = requested {
+                validate_price_usd(price_usd, &format!(" for {id}"))?;
+            }
+        }
         if let Some(minimum_spend_idr) = p.minimum_spend_idr {
             if !(MIN_PRICE_IDR..=MAX_PRICE_IDR).contains(&minimum_spend_idr) {
                 return Err(AppError::BadRequest(format!(
@@ -970,6 +991,7 @@ mod tests {
             advantage: advantage.to_string(),
             group_id: group_id.to_string(),
             price_idr,
+            price_usd: None,
         }
     }
 
@@ -1132,6 +1154,7 @@ mod tests {
             name: format!("Package {id}"),
             advantage: "Advantage text".to_string(),
             price_idr,
+            price_usd: None,
             minimum_spend_idr,
             max_sponsors,
             reserved_sponsors,
@@ -1221,6 +1244,62 @@ mod tests {
             assert!(
                 validate_batch("community-day-2026", &input).is_ok(),
                 "price {price}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_price_usd_null_and_boundaries() {
+        // Triple state: omitted (None) and explicit null (Some(None)) are both
+        // valid without a range check; values are bounded.
+        for price_usd in [
+            None,
+            Some(None),
+            Some(Some(0.01)),
+            Some(Some(88.5)),
+            Some(Some(1_000_000.0)),
+        ] {
+            let mut pkg = update("web-logo", 3_000_000, true, None, None, 0);
+            pkg.price_usd = price_usd;
+            let input = batch(vec![pkg]);
+            assert!(
+                validate_batch("community-day-2026", &input).is_ok(),
+                "priceUsd {price_usd:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_price_usd_out_of_range() {
+        for price_usd in [
+            Some(Some(0.0)),
+            Some(Some(0.009)),
+            Some(Some(-1.0)),
+            Some(Some(1_000_000.01)),
+            Some(Some(f64::NAN)),
+            Some(Some(f64::INFINITY)),
+        ] {
+            let mut pkg = update("web-logo", 3_000_000, true, None, None, 0);
+            pkg.price_usd = price_usd;
+            let input = batch(vec![pkg]);
+            let err = validate_batch("community-day-2026", &input).unwrap_err();
+            assert_eq!(err.status_code(), 400);
+            assert!(err.message().contains("priceUsd"), "priceUsd {price_usd:?}");
+        }
+    }
+
+    #[test]
+    fn package_create_price_usd_bounds() {
+        let mut ok = package_create("Lanyard", "Lanyard branding", "onsite-physical", 7_500_000);
+        ok.price_usd = Some(100.5);
+        assert!(validate_package_create("community-day-2026", &ok).is_ok());
+        for bad in [0.0, -1.0, 0.009, 1_000_000.01, f64::NAN, f64::INFINITY] {
+            let mut input =
+                package_create("Lanyard", "Lanyard branding", "onsite-physical", 7_500_000);
+            input.price_usd = Some(bad);
+            assert!(
+                validate_package_create("community-day-2026", &input).is_err(),
+                "priceUsd {bad}"
             );
         }
     }

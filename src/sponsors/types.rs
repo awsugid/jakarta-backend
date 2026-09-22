@@ -1,6 +1,16 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::links::types::deserialize_d1_bool;
+
+/// Deserialize `Option<Option<T>>` distinguishing a missing field (outer
+/// `None` = keep current value) from an explicit null (inner `None` = clear).
+fn double_option<'de, T, D>(de: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Deserialize::deserialize(de).map(Some)
+}
 
 /// Row from the `sponsor_packages` table.
 ///
@@ -22,6 +32,10 @@ pub struct SponsorPackage {
     pub group_id: Option<String>,
     #[serde(alias = "price_idr")]
     pub price_idr: i64,
+    /// Manual USD price override; null = use the event's usd_exchange_rate
+    /// estimate. Cents allowed (REAL, e.g. 100.5).
+    #[serde(alias = "price_usd")]
+    pub price_usd: Option<f64>,
     /// Optional package-unlock minimum spend (whole IDR); null = no threshold.
     /// Eligibility against a sponsor's total spend is computed by the frontend.
     #[serde(alias = "minimum_spend_idr")]
@@ -51,6 +65,11 @@ pub struct SponsorPackageUpdate {
     /// Advantage/description; 1..=500 chars after trim.
     pub advantage: String,
     pub price_idr: i64,
+    /// Manual USD price override in 0.01..=1_000_000. Triple state via
+    /// double_option: omitted = leave unchanged, null = clear (fall back to
+    /// the exchange-rate estimate), number = set.
+    #[serde(default, deserialize_with = "double_option")]
+    pub price_usd: Option<Option<f64>>,
     /// Optional threshold in the same 1..=1_000_000_000 bounds; null clears it.
     pub minimum_spend_idr: Option<i64>,
     /// Optional capacity cap in 1..=10000; null clears it (unlimited).
@@ -74,6 +93,9 @@ pub struct SponsorPackageCreate {
     /// Target group id; must reference an existing group for the event.
     pub group_id: String,
     pub price_idr: i64,
+    /// Optional manual USD price override in 0.01..=1_000_000; omitted or
+    /// null = no override (use the exchange-rate estimate).
+    pub price_usd: Option<f64>,
 }
 
 /// Entry of the groups array of the admin PUT body (rename/reorder only;
@@ -225,6 +247,16 @@ mod tests {
         );
         let pkg: SponsorPackage = serde_json::from_str(&thresholded).unwrap();
         assert_eq!(pkg.minimum_spend_idr, Some(10_000_000));
+
+        // Legacy D1 rows (pre-migration) omit the column entirely.
+        let pkg: SponsorPackage = serde_json::from_str(row).unwrap();
+        assert_eq!(pkg.price_usd, None);
+        let overridden = row.replace(
+            "\"price_idr\": 2500000",
+            "\"price_idr\": 2500000, \"price_usd\": 100.5",
+        );
+        let pkg: SponsorPackage = serde_json::from_str(&overridden).unwrap();
+        assert_eq!(pkg.price_usd, Some(100.5));
     }
 
     #[test]
@@ -263,6 +295,7 @@ mod tests {
             category: "onsite".into(),
             group_id: None,
             price_idr: 6_000_000,
+            price_usd: Some(100.5),
             minimum_spend_idr: Some(10_000_000),
             max_sponsors: Some(5),
             reserved_sponsors: 2,
@@ -272,6 +305,7 @@ mod tests {
         };
         let json = serde_json::to_value(&pkg).unwrap();
         assert_eq!(json["priceIdr"], 6_000_000);
+        assert_eq!(json["priceUsd"], 100.5);
         assert_eq!(json["minimumSpendIdr"], 10_000_000);
         assert_eq!(json["maxSponsors"], 5);
         assert_eq!(json["reservedSponsors"], 2);
@@ -283,11 +317,13 @@ mod tests {
         let null_json = serde_json::to_value(SponsorPackage {
             minimum_spend_idr: None,
             max_sponsors: None,
+            price_usd: None,
             ..pkg
         })
         .unwrap();
         assert!(null_json["minimumSpendIdr"].is_null());
         assert!(null_json["maxSponsors"].is_null());
+        assert!(null_json["priceUsd"].is_null());
         assert_eq!(null_json["reservedSponsors"], 2);
     }
 
@@ -302,6 +338,34 @@ mod tests {
         assert!(serde_json::from_str::<SponsorPackageUpdate>(
             r#"{"id":"web-logo","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":"true"}"#
         )
+        .is_err());
+    }
+
+    #[test]
+    fn update_entry_price_usd_triple_state() {
+        let base = r#"{"id":"web-logo","name":"Web Logo","advantage":"Logo","priceIdr":2500000,"reservedSponsors":0,"isUnlocked":true}"#;
+        // Omitted -> None (leave unchanged).
+        let omitted: SponsorPackageUpdate = serde_json::from_str(base).unwrap();
+        assert_eq!(omitted.price_usd, None);
+        // Explicit null -> Some(None) (clear the override).
+        let cleared: SponsorPackageUpdate = serde_json::from_str(&base.replace(
+            "\"isUnlocked\":true",
+            "\"priceUsd\":null,\"isUnlocked\":true",
+        ))
+        .unwrap();
+        assert_eq!(cleared.price_usd, Some(None));
+        // Number -> Some(Some(v)); cents allowed.
+        let set: SponsorPackageUpdate = serde_json::from_str(&base.replace(
+            "\"isUnlocked\":true",
+            "\"priceUsd\":100.5,\"isUnlocked\":true",
+        ))
+        .unwrap();
+        assert_eq!(set.price_usd, Some(Some(100.5)));
+        // Non-number types are rejected.
+        assert!(serde_json::from_str::<SponsorPackageUpdate>(&base.replace(
+            "\"isUnlocked\":true",
+            "\"priceUsd\":\"100\",\"isUnlocked\":true"
+        ))
         .is_err());
     }
 
@@ -405,6 +469,7 @@ mod tests {
             category: "digital".into(),
             group_id: Some("digital-media".into()),
             price_idr: 2_500_000,
+            price_usd: None,
             minimum_spend_idr: None,
             max_sponsors: None,
             reserved_sponsors: 0,
@@ -479,6 +544,19 @@ mod tests {
         assert_eq!(ok.advantage, "Lanyard branding");
         assert_eq!(ok.group_id, "onsite-physical");
         assert_eq!(ok.price_idr, 7_500_000);
+        assert_eq!(ok.price_usd, None);
+
+        // Optional priceUsd: omitted/null -> None, number -> Some.
+        let with_usd: SponsorPackageCreate = serde_json::from_str(
+            r#"{"name":"Lanyard","advantage":"Lanyard branding","groupId":"onsite-physical","priceIdr":7500000,"priceUsd":100}"#,
+        )
+        .unwrap();
+        assert_eq!(with_usd.price_usd, Some(100.0));
+        let null_usd: SponsorPackageCreate = serde_json::from_str(
+            r#"{"name":"Lanyard","advantage":"Lanyard branding","groupId":"onsite-physical","priceIdr":7500000,"priceUsd":null}"#,
+        )
+        .unwrap();
+        assert_eq!(null_usd.price_usd, None);
 
         // Missing any field is rejected.
         for body in [

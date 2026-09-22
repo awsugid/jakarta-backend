@@ -301,7 +301,7 @@ impl SponsorPackageRepository {
     /// List all packages for an event (locked included) ordered by display_order, id.
     pub async fn list_packages(&self, event_slug: &str) -> WorkerResult<Vec<SponsorPackage>> {
         let sql = r#"
-            SELECT id, event_slug, name, advantage, category, group_id, price_idr, minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked, display_order, updated_at
+            SELECT id, event_slug, name, advantage, category, group_id, price_idr, price_usd, minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked, display_order, updated_at
             FROM sponsor_packages
             WHERE event_slug = ?
             ORDER BY display_order, id
@@ -373,6 +373,7 @@ impl SponsorPackageRepository {
         advantage: &str,
         group_id: &str,
         price_idr: i64,
+        price_usd: Option<f64>,
     ) -> Result<(String, Vec<SponsorPackageGroup>, Vec<SponsorPackage>), CreatePackageError> {
         let groups = self.list_groups(event_slug).await?;
         if !groups.iter().any(|g| g.id == group_id) {
@@ -403,9 +404,9 @@ impl SponsorPackageRepository {
                 r#"
                 INSERT INTO sponsor_packages
                     (id, event_slug, name, advantage, category, group_id, price_idr,
-                     minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked,
+                     price_usd, minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked,
                      display_order, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, ?, datetime('now'))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, ?, datetime('now'))
             "#,
             )
             .bind(&[
@@ -416,6 +417,7 @@ impl SponsorPackageRepository {
                 JsValue::from_str(category),
                 JsValue::from_str(group_id),
                 JsValue::from_f64(price_idr as f64),
+                price_usd.map(JsValue::from_f64).unwrap_or(JsValue::NULL),
                 JsValue::from_f64(next_order as f64),
             ])?
             .run()
@@ -515,6 +517,7 @@ impl SponsorPackageRepository {
             SET name = ?,
                 advantage = ?,
                 price_idr = ?,
+                price_usd = ?,
                 minimum_spend_idr = ?,
                 max_sponsors = ?,
                 reserved_sponsors = ?,
@@ -545,6 +548,20 @@ impl SponsorPackageRepository {
         }
         for u in package_updates {
             // NULL unbinds the threshold/cap/group; whole-IDR i64 fits losslessly in f64.
+            // priceUsd is triple-state: omitted keeps the row's current value
+            // (pre-update rows were already read above), null clears, number sets.
+            let existing_price_usd = existing_packages
+                .iter()
+                .find(|p| p.id == u.id)
+                .and_then(|p| p.price_usd);
+            let price_usd = match u.price_usd {
+                Some(requested) => requested,
+                None => existing_price_usd,
+            };
+            let price_usd = match price_usd {
+                Some(v) => JsValue::from_f64(v),
+                None => JsValue::NULL,
+            };
             let minimum_spend_idr = match u.minimum_spend_idr {
                 Some(v) => JsValue::from_f64(v as f64),
                 None => JsValue::NULL,
@@ -561,6 +578,7 @@ impl SponsorPackageRepository {
                 JsValue::from_str(u.name.trim()),
                 JsValue::from_str(u.advantage.trim()),
                 JsValue::from_f64(u.price_idr as f64),
+                price_usd,
                 minimum_spend_idr,
                 max_sponsors,
                 JsValue::from_f64(u.reserved_sponsors as f64),
@@ -939,6 +957,7 @@ mod tests {
             category: "digital".to_string(),
             group_id: None,
             price_idr: 1_000_000,
+            price_usd: None,
             minimum_spend_idr: None,
             max_sponsors: None,
             reserved_sponsors: 0,
@@ -954,6 +973,7 @@ mod tests {
             name: name.to_string(),
             advantage: format!("{name} advantage"),
             price_idr: 1_000_000,
+            price_usd: None,
             minimum_spend_idr: None,
             max_sponsors: None,
             reserved_sponsors: 0,
