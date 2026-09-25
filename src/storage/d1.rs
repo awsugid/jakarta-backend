@@ -647,3 +647,119 @@ impl ProfileRepository {
         result.results::<Profile>()
     }
 }
+
+/// Survey-scoped custom tag assignments on Formbricks responses
+/// (table `response_tags`, migration 0015).
+pub struct ResponseTagRepository {
+    db: D1Database,
+}
+
+impl ResponseTagRepository {
+    pub fn new(db: D1Database) -> Self {
+        Self { db }
+    }
+
+    /// Distinct assigned labels for a survey, alphabetical. This IS the catalog:
+    /// labels disappear when no assignment references them.
+    pub async fn list_survey_tags(&self, survey_id: &str) -> WorkerResult<Vec<String>> {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            tag: String,
+        }
+        let sql = "SELECT DISTINCT tag FROM response_tags WHERE survey_id = ? ORDER BY tag";
+        let result = self
+            .db
+            .prepare(sql)
+            .bind(&[JsValue::from_str(survey_id)])?
+            .all()
+            .await?;
+        Ok(result
+            .results::<Row>()?
+            .into_iter()
+            .map(|r| r.tag)
+            .collect())
+    }
+
+    /// All (response_id, tag) assignments for a survey, tags alphabetical.
+    /// One roundtrip feeds both list enrichment and exact tag filtering.
+    pub async fn list_survey_tag_map(
+        &self,
+        survey_id: &str,
+    ) -> WorkerResult<Vec<(String, String)>> {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            response_id: String,
+            tag: String,
+        }
+        let sql =
+            "SELECT response_id, tag FROM response_tags WHERE survey_id = ? ORDER BY response_id, tag";
+        let result = self
+            .db
+            .prepare(sql)
+            .bind(&[JsValue::from_str(survey_id)])?
+            .all()
+            .await?;
+        Ok(result
+            .results::<Row>()?
+            .into_iter()
+            .map(|r| (r.response_id, r.tag))
+            .collect())
+    }
+
+    /// Tags assigned to one response, alphabetical.
+    pub async fn get_response_tags(
+        &self,
+        survey_id: &str,
+        response_id: &str,
+    ) -> WorkerResult<Vec<String>> {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            tag: String,
+        }
+        let sql =
+            "SELECT tag FROM response_tags WHERE survey_id = ? AND response_id = ? ORDER BY tag";
+        let result = self
+            .db
+            .prepare(sql)
+            .bind(&[JsValue::from_str(survey_id), JsValue::from_str(response_id)])?
+            .all()
+            .await?;
+        Ok(result
+            .results::<Row>()?
+            .into_iter()
+            .map(|r| r.tag)
+            .collect())
+    }
+
+    /// Replace a response's tag set atomically (D1 batch = SQL transaction:
+    /// delete + inserts commit together or roll back together).
+    /// Empty `tags` clears all assignments.
+    pub async fn replace_response_tags(
+        &self,
+        survey_id: &str,
+        response_id: &str,
+        tags: &[String],
+    ) -> WorkerResult<()> {
+        let mut statements = vec![self
+            .db
+            .prepare("DELETE FROM response_tags WHERE survey_id = ? AND response_id = ?")
+            .bind(&[JsValue::from_str(survey_id), JsValue::from_str(response_id)])?];
+
+        for tag in tags {
+            statements.push(
+                self.db
+                    .prepare(
+                        "INSERT INTO response_tags (survey_id, response_id, tag) VALUES (?, ?, ?)",
+                    )
+                    .bind(&[
+                        JsValue::from_str(survey_id),
+                        JsValue::from_str(response_id),
+                        JsValue::from_str(tag),
+                    ])?,
+            );
+        }
+
+        self.db.batch(statements).await?;
+        Ok(())
+    }
+}

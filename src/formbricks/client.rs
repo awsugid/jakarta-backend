@@ -18,7 +18,9 @@ impl FormbricksClient {
 
     /// List responses for a survey with pagination.
     ///
-    /// Calls `GET /api/v2/management/responses?surveyId=xxx&limit=xx&offset=xx`.
+    /// Calls `GET /api/v2/management/responses?surveyId=xxx&limit=xx&skip=xx`.
+    /// Upstream v2 has no `offset` param (unknown params are dropped), so the
+    /// public `offset` is sent as `skip`; the response meta echoes it as `offset`.
     #[allow(dead_code)]
     pub async fn list_responses(
         &self,
@@ -26,10 +28,7 @@ impl FormbricksClient {
         limit: u32,
         offset: u32,
     ) -> Result<FormbricksResponseList, String> {
-        let url = format!(
-            "{}/api/v2/management/responses?surveyId={}&limit={}&offset={}",
-            self.base_url, survey_id, limit, offset
-        );
+        let url = build_responses_url(&self.base_url, survey_id, limit, offset);
 
         let headers = Headers::new();
         headers
@@ -77,6 +76,8 @@ impl FormbricksClient {
     }
 
     /// Fetch all responses for a survey, paginating automatically up to a safety limit.
+    /// Fails loudly if `meta.total` is missing or the safety cap is hit, rather than
+    /// silently returning a truncated set.
     #[allow(dead_code)]
     pub async fn get_all_responses(
         &self,
@@ -90,13 +91,12 @@ impl FormbricksClient {
 
         loop {
             let result = self.list_responses(survey_id, limit, offset).await?;
+            let total = require_total(&result)?;
             all_responses.extend(result.data);
-
-            let total = result.meta.as_ref().and_then(|m| m.total).unwrap_or(0) as u32;
             offset += limit;
             pages += 1;
 
-            if offset >= total || pages >= max_pages {
+            if !should_continue_paging(offset, total, pages, max_pages)? {
                 break;
             }
         }
@@ -263,6 +263,44 @@ impl FormbricksClient {
     }
 }
 
+/// Build the upstream v2 responses list URL. The paging param is `skip`:
+/// upstream zod validation drops unknown params, so an `offset=` query would be
+/// silently ignored and every page would return the first page.
+fn build_responses_url(base_url: &str, survey_id: &str, limit: u32, skip: u32) -> String {
+    format!(
+        "{}/api/v2/management/responses?surveyId={}&limit={}&skip={}",
+        base_url, survey_id, limit, skip
+    )
+}
+
+/// Extract `meta.total`, failing loudly when upstream omits it.
+/// A missing total previously defaulted to 0, silently truncating to the first page.
+fn require_total(list: &FormbricksResponseList) -> Result<u64, String> {
+    list.meta.as_ref().and_then(|m| m.total).ok_or_else(|| {
+        "FormBricks response page omitted meta.total; cannot paginate safely".to_string()
+    })
+}
+
+/// Decide whether another page is needed. Errors instead of silently truncating
+/// when the safety cap would stop the walk before all pages are fetched.
+/// Exhaustion is checked first so finishing exactly at the cap is not an error.
+fn should_continue_paging(
+    skip: u32,
+    total: u64,
+    pages: u32,
+    max_pages: u32,
+) -> Result<bool, String> {
+    if skip as u64 >= total {
+        Ok(false)
+    } else if pages >= max_pages {
+        Err(format!(
+            "safety cap of {max_pages} pages reached with {total} total responses; refusing to silently truncate"
+        ))
+    } else {
+        Ok(true)
+    }
+}
+
 /// Truncate a string to `max` characters for safe error reporting.
 fn truncate(s: &str, max: usize) -> &str {
     if s.len() <= max {
@@ -274,5 +312,67 @@ fn truncate(s: &str, max: usize) -> &str {
             end -= 1;
         }
         &s[..end]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::formbricks::types::FormbricksMeta;
+
+    #[test]
+    fn responses_url_uses_skip_not_offset() {
+        // Regression: upstream v2 reads `skip`; an `offset=` param is dropped by
+        // zod validation, making every page request return the first page.
+        let url = build_responses_url("https://fb.example.com", "cm1survey", 50, 100);
+        assert!(url.contains("surveyId=cm1survey"));
+        assert!(url.contains("limit=50"));
+        assert!(url.contains("skip=100"));
+        assert!(!url.contains("offset"));
+    }
+
+    fn list_with_total(total: Option<u64>) -> FormbricksResponseList {
+        FormbricksResponseList {
+            data: vec![],
+            meta: total.map(|t| FormbricksMeta {
+                total: Some(t),
+                limit: None,
+                offset: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn require_total_fails_when_missing() {
+        // Regression: missing meta/total used to default to 0 and silently
+        // truncate get_all_responses to the first page.
+        assert!(require_total(&list_with_total(None)).is_err());
+        let no_total = FormbricksResponseList {
+            data: vec![],
+            meta: Some(FormbricksMeta {
+                total: None,
+                limit: None,
+                offset: None,
+            }),
+        };
+        assert!(require_total(&no_total).is_err());
+        assert_eq!(require_total(&list_with_total(Some(250))).unwrap(), 250);
+    }
+
+    #[test]
+    fn paging_stops_only_when_exhausted() {
+        assert!(should_continue_paging(200, 250, 2, 10).unwrap());
+        assert!(!should_continue_paging(250, 250, 3, 10).unwrap());
+        assert!(!should_continue_paging(300, 250, 3, 10).unwrap());
+    }
+
+    #[test]
+    fn paging_cap_fails_instead_of_truncating() {
+        // Regression: hitting max_pages used to break the loop silently,
+        // returning a truncated set as if it were complete.
+        // 1000 responses at page size 100 needs 10 pages; cap of 5 must error.
+        assert!(should_continue_paging(500, 1000, 5, 5).is_err());
+        // Finishing exactly at the cap is success, not an error.
+        assert!(!should_continue_paging(1000, 1000, 10, 10).unwrap());
     }
 }

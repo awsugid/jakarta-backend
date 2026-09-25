@@ -146,6 +146,15 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                 crate::http::admin::handle_admin_response_detail(req, ctx).await
             },
         )
+        .get_async("/api/admin/formbricks/tags", |req, ctx| async move {
+            crate::http::admin::handle_admin_survey_tags(req, ctx).await
+        })
+        .put_async(
+            "/api/admin/formbricks/responses/:responseId/tags",
+            |req, ctx| async move {
+                crate::http::admin::handle_admin_replace_response_tags(req, ctx).await
+            },
+        )
         // ---------------------------------------------------------------
         // GET /api/pretix/me/orders — authenticated user order history
         // ---------------------------------------------------------------
