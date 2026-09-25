@@ -10,13 +10,9 @@ pub fn utc_now_string() -> String {
         .unwrap_or_default()
 }
 
-/// Check if a form is currently open for new applications.
-pub fn is_form_open(form: &ApplicationForm) -> bool {
-    is_form_open_at(form, &utc_now_string())
-}
-
-/// Pure-Rust version of `is_form_open` that accepts the current time as a parameter.
-/// This is the testable core that doesn't depend on JS/WASM.
+/// Check if a form is currently open for new applications (strict: inactive
+/// forms are never open — speaker semantics). Kind-aware callers use
+/// `accepting_for_kind` instead.
 pub fn is_form_open_at(form: &ApplicationForm, now: &str) -> bool {
     if !form.is_active {
         return false;
@@ -36,12 +32,9 @@ pub fn is_form_open_at(form: &ApplicationForm, now: &str) -> bool {
     true
 }
 
-/// Check if existing applications can still be edited.
-pub fn is_form_editable(form: &ApplicationForm) -> bool {
-    is_form_editable_at(form, &utc_now_string())
-}
-
-/// Pure-Rust version of `is_form_editable` that accepts the current time as a parameter.
+/// Check if existing applications can still be edited (strict: inactive
+/// forms are never editable — speaker semantics). `editable_for_kind` is the
+/// kind-aware entry point.
 pub fn is_form_editable_at(form: &ApplicationForm, now: &str) -> bool {
     if !form.is_active {
         return false;
@@ -53,9 +46,69 @@ pub fn is_form_editable_at(form: &ApplicationForm, now: &str) -> bool {
     is_form_open_at(form, now)
 }
 
-/// Check if form is archived (past its archive date).
-pub fn is_form_archived(form: &ApplicationForm) -> bool {
-    is_form_archived_at(form, &utc_now_string())
+// ---------------------------------------------------------------------------
+// Volunteer Talent Pool mode
+// ---------------------------------------------------------------------------
+// For volunteer forms `is_active = false` means "not recruiting" (Talent Pool)
+// rather than "closed": submissions stay open and existing responses stay
+// editable, gated only by dates. Speaker forms keep the strict `is_active`
+// semantics above.
+
+/// Volunteer-aware submission gate: volunteers submit while their date window
+/// is open even when inactive (Talent Pool); speakers require the strict
+/// `is_form_open` (is_active + dates).
+pub fn accepting_for_kind(form: &ApplicationForm) -> bool {
+    accepting_for_kind_at(form, &utc_now_string())
+}
+
+/// Pure-Rust version of `accepting_for_kind`.
+pub fn accepting_for_kind_at(form: &ApplicationForm, now: &str) -> bool {
+    if form.kind == "volunteer" {
+        is_form_accepting_submissions_at(form, now)
+    } else {
+        is_form_open_at(form, now)
+    }
+}
+
+/// Volunteer Talent Pool submission window: date checks only, `is_active`
+/// deliberately ignored. Pure-Rust core (no JS clock) so it stays testable.
+pub fn is_form_accepting_submissions_at(form: &ApplicationForm, now: &str) -> bool {
+    if let Some(ref opens_at) = form.opens_at {
+        if opens_at.as_str() > now {
+            return false;
+        }
+    }
+    if let Some(ref closes_at) = form.closes_at {
+        if closes_at.as_str() < now {
+            return false;
+        }
+    }
+    true
+}
+
+/// Volunteer-aware editability: Talent Pool responses stay editable; speaker
+/// responses keep the strict `is_form_editable` gate.
+pub fn editable_for_kind(form: &ApplicationForm) -> bool {
+    editable_for_kind_at(form, &utc_now_string())
+}
+
+/// Pure-Rust version of `editable_for_kind`.
+pub fn editable_for_kind_at(form: &ApplicationForm, now: &str) -> bool {
+    if form.kind == "volunteer" {
+        is_form_editable_ignoring_active_at(form, now)
+    } else {
+        is_form_editable_at(form, now)
+    }
+}
+
+/// `is_form_editable` without the `is_active` gate (volunteer Talent Pool).
+/// Pure-Rust core (no JS clock) so it stays testable.
+pub fn is_form_editable_ignoring_active_at(form: &ApplicationForm, now: &str) -> bool {
+    if let Some(ref editable_until) = form.editable_until {
+        return editable_until.as_str() >= now;
+    }
+    // No editable_until set: editable as long as submissions are accepted
+    is_form_accepting_submissions_at(form, now)
 }
 
 /// Pure-Rust version of `is_form_archived` that accepts the current time as a parameter.
@@ -277,5 +330,98 @@ mod tests {
         form.archive_after = Some("2026-05-01T00:00:00Z".to_string());
         // archive check doesn't look at is_active
         assert!(is_form_archived_at(&form, "2026-06-01T00:00:00Z"));
+    }
+
+    // ---- Talent Pool: accepting_for_kind / is_form_accepting_submissions_at ----
+
+    #[test]
+    fn talent_pool_inactive_volunteer_still_accepts_within_dates() {
+        let mut form = make_form(); // kind = volunteer
+        form.is_active = false;
+        assert!(is_form_accepting_submissions_at(
+            &form,
+            "2026-06-01T00:00:00Z"
+        ));
+    }
+
+    #[test]
+    fn talent_pool_dates_still_gate_volunteer() {
+        let mut form = make_form();
+        form.is_active = false;
+        form.opens_at = Some("2026-07-01T00:00:00Z".to_string());
+        assert!(!is_form_accepting_submissions_at(
+            &form,
+            "2026-06-01T00:00:00Z"
+        ));
+        form.opens_at = None;
+        form.closes_at = Some("2026-05-01T00:00:00Z".to_string());
+        assert!(!is_form_accepting_submissions_at(
+            &form,
+            "2026-06-01T00:00:00Z"
+        ));
+    }
+
+    #[test]
+    fn accepting_for_kind_volunteer_ignores_active_speaker_does_not() {
+        let mut volunteer = make_form(); // kind = volunteer
+        volunteer.is_active = false;
+        assert!(accepting_for_kind_at(&volunteer, "2026-06-01T00:00:00Z"));
+
+        let mut speaker = make_form();
+        speaker.kind = "speaker".to_string();
+        speaker.is_active = false;
+        assert!(!accepting_for_kind_at(&speaker, "2026-06-01T00:00:00Z"));
+        speaker.is_active = true;
+        assert!(accepting_for_kind_at(&speaker, "2026-06-01T00:00:00Z"));
+    }
+
+    // ---- editable_for_kind / is_form_editable_ignoring_active_at ----
+
+    #[test]
+    fn editable_ignoring_active_volunteer_talent_pool() {
+        let mut form = make_form();
+        form.is_active = false;
+        assert!(is_form_editable_ignoring_active_at(
+            &form,
+            "2026-06-01T00:00:00Z"
+        ));
+        assert!(editable_for_kind_at(&form, "2026-06-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn editable_ignoring_active_still_honors_editable_until() {
+        let mut form = make_form();
+        form.is_active = false;
+        form.editable_until = Some("2026-05-01T00:00:00Z".to_string());
+        assert!(!is_form_editable_ignoring_active_at(
+            &form,
+            "2026-06-01T00:00:00Z"
+        ));
+        form.editable_until = Some("2026-07-01T00:00:00Z".to_string());
+        assert!(is_form_editable_ignoring_active_at(
+            &form,
+            "2026-06-01T00:00:00Z"
+        ));
+    }
+
+    #[test]
+    fn editable_ignoring_active_falls_back_to_date_window() {
+        let mut form = make_form();
+        form.is_active = false;
+        form.closes_at = Some("2026-05-01T00:00:00Z".to_string());
+        // Closed window + no editable_until => not editable
+        assert!(!is_form_editable_ignoring_active_at(
+            &form,
+            "2026-06-01T00:00:00Z"
+        ));
+    }
+
+    #[test]
+    fn editable_for_kind_speaker_keeps_strict_gate() {
+        let mut speaker = make_form();
+        speaker.kind = "speaker".to_string();
+        speaker.is_active = false;
+        speaker.editable_until = Some("2026-07-01T00:00:00Z".to_string());
+        assert!(!editable_for_kind_at(&speaker, "2026-06-01T00:00:00Z"));
     }
 }

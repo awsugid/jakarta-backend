@@ -76,12 +76,14 @@ impl FormRepository {
         Self { db }
     }
 
-    /// List all active forms, optionally filtered by kind.
+    /// List public forms. Inactive volunteer forms are included: for
+    /// volunteers `is_active = 0` means Talent Pool mode (still listed, still
+    /// accepting submissions). Inactive speaker forms stay excluded.
     pub async fn list_forms(&self, kind: Option<&str>) -> WorkerResult<Vec<ApplicationForm>> {
         let result = match kind {
             Some(k) => {
                 let sql =
-                    "SELECT * FROM application_forms WHERE kind = ? AND is_active = 1 ORDER BY display_order, title";
+                    "SELECT * FROM application_forms WHERE kind = ? AND (is_active = 1 OR kind = 'volunteer') ORDER BY display_order, title";
                 self.db
                     .prepare(sql)
                     .bind(&[JsValue::from_str(k)])?
@@ -89,8 +91,7 @@ impl FormRepository {
                     .await?
             }
             None => {
-                let sql =
-                    "SELECT * FROM application_forms WHERE is_active = 1 ORDER BY kind, display_order, title";
+                let sql = "SELECT * FROM application_forms WHERE is_active = 1 OR kind = 'volunteer' ORDER BY kind, display_order, title";
                 self.db.prepare(sql).all().await?
             }
         };
@@ -121,7 +122,6 @@ impl FormRepository {
     }
 
     /// Get a form by its FormBricks survey ID.
-    #[allow(dead_code)]
     pub async fn get_form_by_survey_id(
         &self,
         survey_id: &str,
@@ -146,6 +146,9 @@ impl FormRepository {
 
     /// Count active responses per form_id for the given set of form IDs.
     /// Returns a map of form_id → count.
+    /// Admin response counts now come from live Formbricks walks; kept for
+    /// D1-index reconciliation tooling.
+    #[allow(dead_code)]
     pub async fn count_responses_by_form_ids(
         &self,
         form_ids: &[&str],
@@ -760,6 +763,27 @@ impl ResponseTagRepository {
         }
 
         self.db.batch(statements).await?;
+        Ok(())
+    }
+
+    /// Add one tag without touching the response's other tags. Idempotent via
+    /// the table's PK (`INSERT OR IGNORE`): webhook retries are no-ops and
+    /// manually assigned tags survive.
+    pub async fn add_response_tag_if_missing(
+        &self,
+        survey_id: &str,
+        response_id: &str,
+        tag: &str,
+    ) -> WorkerResult<()> {
+        self.db
+            .prepare("INSERT OR IGNORE INTO response_tags (survey_id, response_id, tag) VALUES (?, ?, ?)")
+            .bind(&[
+                JsValue::from_str(survey_id),
+                JsValue::from_str(response_id),
+                JsValue::from_str(tag),
+            ])?
+            .run()
+            .await?;
         Ok(())
     }
 }

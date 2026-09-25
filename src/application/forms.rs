@@ -73,7 +73,7 @@ pub struct FormStatusAuthed {
     pub status: FormPolicyStatus,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum FormPolicyStatus {
     Open,
