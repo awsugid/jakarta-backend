@@ -7,11 +7,13 @@ use crate::config::AppConfig;
 use crate::http::errors::AppError;
 use crate::http::response::{json_success, json_success_cors, with_cors};
 use crate::sponsors::repository::{
-    CreateGroupError, CreatePackageError, CreateTierError, DeleteGroupError, DeletePackageError,
-    DeleteTierError, SponsorPackageRepository, UpdatePackagesError, UpdateTiersError,
+    CreateGroupError, CreatePackageError, CreateSponsorError, CreateTierError, DeleteGroupError,
+    DeletePackageError, DeleteSponsorError, DeleteTierError, ReorderSponsorsError,
+    SponsorPackageRepository, UpdatePackagesError, UpdateSponsorError, UpdateTiersError,
     MAX_PACKAGES_PER_EVENT, MAX_TIERS_PER_EVENT,
 };
 use crate::sponsors::types::{
+    EventSponsorCreate, EventSponsorReorderBody, EventSponsorUpdate, EventSponsorsResponse,
     SponsorPackageBatchUpdate, SponsorPackageCreate, SponsorPackageGroupCreate,
     SponsorPackagesResponse, SponsorSettingsUpdate, SponsorTierBatchUpdate, SponsorTierCreate,
 };
@@ -705,6 +707,287 @@ pub async fn handle_admin_update_sponsor_settings(
     };
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
+}
+
+/// GET /api/events/:eventSlug/sponsors — public listing, active sponsors only.
+pub async fn handle_public_sponsors(req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let _origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+    validate_event_slug(event_slug)?;
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = SponsorPackageRepository::new(db);
+
+    let sponsors = repo
+        .list_active_sponsors(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let body = EventSponsorsResponse {
+        event_slug,
+        sponsors: &sponsors,
+    };
+    let resp = json_success(&body)?;
+    with_cors(resp, &config.allowed_origins)
+}
+
+/// GET /api/admin/events/:eventSlug/sponsors — admin listing, all sponsors included.
+pub async fn handle_admin_list_sponsors(req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+    validate_event_slug(event_slug)?;
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = SponsorPackageRepository::new(db);
+
+    let sponsors = repo
+        .list_sponsors(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let body = EventSponsorsResponse {
+        event_slug,
+        sponsors: &sponsors,
+    };
+    json_success_cors(&body, &config.allowed_origins, origin.as_deref())
+}
+
+/// POST /api/admin/events/:eventSlug/sponsors — create a sponsor.
+pub async fn handle_admin_create_sponsor(
+    mut req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+    validate_event_slug(event_slug)?;
+
+    let input: EventSponsorCreate = req
+        .json()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
+
+    let name_trim = input.name.trim();
+    if name_trim.is_empty() || name_trim.len() > 100 {
+        return Err(AppError::BadRequest(
+            "Sponsor name must be between 1 and 100 characters".to_string(),
+        )
+        .into());
+    }
+    let logo_trim = input.logo_url.trim();
+    if logo_trim.is_empty() || logo_trim.len() > 500 {
+        return Err(AppError::BadRequest(
+            "Logo URL must be between 1 and 500 characters".to_string(),
+        )
+        .into());
+    }
+    let tier_trim = input.tier.trim();
+    if tier_trim.is_empty() || tier_trim.len() > 50 {
+        return Err(
+            AppError::BadRequest("Tier must be between 1 and 50 characters".to_string()).into(),
+        );
+    }
+    if let Some(price) = input.price_idr {
+        if !(0..=1_000_000_000).contains(&price) {
+            return Err(AppError::BadRequest(
+                "Price must be between 0 and 1,000,000,000 IDR".to_string(),
+            )
+            .into());
+        }
+    }
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = SponsorPackageRepository::new(db);
+
+    let created = repo
+        .create_sponsor(event_slug, input)
+        .await
+        .map_err(|e| match e {
+            CreateSponsorError::DuplicateName => AppError::Conflict(
+                "A sponsor with this name already exists for this event".to_string(),
+            ),
+            CreateSponsorError::Db(e) => AppError::Internal(e.to_string()),
+        })?;
+
+    console_log!("sponsor created: event={event_slug} id={}", created.id);
+    json_success_cors(&created, &config.allowed_origins, origin.as_deref())
+}
+
+/// PUT /api/admin/events/:eventSlug/sponsors/:sponsorId — update a sponsor.
+pub async fn handle_admin_update_sponsor(
+    mut req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+    let sponsor_id = ctx
+        .param("sponsorId")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: sponsorId".to_string()))?;
+    validate_event_slug(event_slug)?;
+
+    let input: EventSponsorUpdate = req
+        .json()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
+
+    let name_trim = input.name.trim();
+    if name_trim.is_empty() || name_trim.len() > 100 {
+        return Err(AppError::BadRequest(
+            "Sponsor name must be between 1 and 100 characters".to_string(),
+        )
+        .into());
+    }
+    let logo_trim = input.logo_url.trim();
+    if logo_trim.is_empty() || logo_trim.len() > 500 {
+        return Err(AppError::BadRequest(
+            "Logo URL must be between 1 and 500 characters".to_string(),
+        )
+        .into());
+    }
+    let tier_trim = input.tier.trim();
+    if tier_trim.is_empty() || tier_trim.len() > 50 {
+        return Err(
+            AppError::BadRequest("Tier must be between 1 and 50 characters".to_string()).into(),
+        );
+    }
+    if !(0..=1_000_000_000).contains(&input.price_idr) {
+        return Err(AppError::BadRequest(
+            "Price must be between 0 and 1,000,000,000 IDR".to_string(),
+        )
+        .into());
+    }
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = SponsorPackageRepository::new(db);
+
+    let updated = repo
+        .update_sponsor(event_slug, sponsor_id.trim(), input)
+        .await
+        .map_err(|e| match e {
+            UpdateSponsorError::NotFound => AppError::NotFound(format!(
+                "Sponsor '{sponsor_id}' not found for event {event_slug}"
+            )),
+            UpdateSponsorError::DuplicateName => AppError::Conflict(
+                "Another sponsor with this name already exists for this event".to_string(),
+            ),
+            UpdateSponsorError::Db(e) => AppError::Internal(e.to_string()),
+        })?;
+
+    console_log!("sponsor updated: event={event_slug} id={sponsor_id}");
+    json_success_cors(&updated, &config.allowed_origins, origin.as_deref())
+}
+
+/// DELETE /api/admin/events/:eventSlug/sponsors/:sponsorId — delete a sponsor.
+pub async fn handle_admin_delete_sponsor(req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+    let sponsor_id = ctx
+        .param("sponsorId")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: sponsorId".to_string()))?;
+    validate_event_slug(event_slug)?;
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = SponsorPackageRepository::new(db);
+
+    repo.delete_sponsor(event_slug, sponsor_id.trim())
+        .await
+        .map_err(|e| match e {
+            DeleteSponsorError::NotFound => AppError::NotFound(format!(
+                "Sponsor '{sponsor_id}' not found for event {event_slug}"
+            )),
+            DeleteSponsorError::Db(e) => AppError::Internal(e.to_string()),
+        })?;
+
+    console_log!("sponsor deleted: event={event_slug} id={sponsor_id}");
+    let sponsors = repo
+        .list_sponsors(event_slug)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let body = EventSponsorsResponse {
+        event_slug,
+        sponsors: &sponsors,
+    };
+    json_success_cors(&body, &config.allowed_origins, origin.as_deref())
+}
+
+/// PUT /api/admin/events/:eventSlug/sponsors/order — reorder sponsors.
+pub async fn handle_admin_reorder_sponsors(
+    mut req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+    validate_event_slug(event_slug)?;
+
+    let input: EventSponsorReorderBody = req
+        .json()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = SponsorPackageRepository::new(db);
+
+    let sponsors = repo
+        .reorder_sponsors(event_slug, &input.items)
+        .await
+        .map_err(|e| match e {
+            ReorderSponsorsError::InvalidOrder => {
+                AppError::BadRequest("Invalid sponsor order list".to_string())
+            }
+            ReorderSponsorsError::Db(e) => AppError::Internal(e.to_string()),
+        })?;
+
+    let body = EventSponsorsResponse {
+        event_slug,
+        sponsors: &sponsors,
+    };
+    json_success_cors(&body, &config.allowed_origins, origin.as_deref())
 }
 
 // --- validation helpers ---

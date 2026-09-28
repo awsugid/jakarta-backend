@@ -222,6 +222,81 @@ pub struct SponsorPackagesResponse<'a> {
     pub tiers: &'a [SponsorTier],
 }
 
+/// Row from the `event_sponsors` table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventSponsor {
+    pub id: String,
+    #[serde(alias = "event_slug")]
+    pub event_slug: String,
+    pub name: String,
+    #[serde(alias = "logo_url")]
+    pub logo_url: String,
+    #[serde(alias = "website_url")]
+    pub website_url: Option<String>,
+    pub tier: String,
+    #[serde(alias = "price_idr")]
+    pub price_idr: i64,
+    pub description: Option<String>,
+    #[serde(alias = "is_active", deserialize_with = "deserialize_d1_bool")]
+    pub is_active: bool,
+    #[serde(alias = "display_order")]
+    pub display_order: i32,
+    #[serde(alias = "created_at")]
+    pub created_at: String,
+    #[serde(alias = "updated_at")]
+    pub updated_at: String,
+}
+
+/// POST /api/admin/events/:eventSlug/sponsors body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventSponsorCreate {
+    pub name: String,
+    pub logo_url: String,
+    pub website_url: Option<String>,
+    pub tier: String,
+    pub price_idr: Option<i64>,
+    pub description: Option<String>,
+    pub is_active: Option<bool>,
+}
+
+/// PUT /api/admin/events/:eventSlug/sponsors/:sponsorId body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventSponsorUpdate {
+    pub name: String,
+    pub logo_url: String,
+    pub website_url: Option<String>,
+    pub tier: String,
+    pub price_idr: i64,
+    pub description: Option<String>,
+    pub is_active: bool,
+}
+
+/// Item in PUT /api/admin/events/:eventSlug/sponsors/order body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventSponsorOrderItem {
+    pub id: String,
+    pub display_order: i32,
+}
+
+/// PUT /api/admin/events/:eventSlug/sponsors/order body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventSponsorReorderBody {
+    pub items: Vec<EventSponsorOrderItem>,
+}
+
+/// Public / Admin sponsors response.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventSponsorsResponse<'a> {
+    pub event_slug: &'a str,
+    pub sponsors: &'a [EventSponsor],
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

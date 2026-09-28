@@ -6,8 +6,9 @@ use worker::d1::D1Result;
 use worker::{D1Database, Result as WorkerResult};
 
 use crate::sponsors::types::{
-    SponsorPackage, SponsorPackageGroup, SponsorPackageGroupUpdate, SponsorPackageUpdate,
-    SponsorTier, SponsorTierUpdate,
+    EventSponsor, EventSponsorCreate, EventSponsorOrderItem, EventSponsorUpdate, SponsorPackage,
+    SponsorPackageGroup, SponsorPackageGroupUpdate, SponsorPackageUpdate, SponsorTier,
+    SponsorTierUpdate,
 };
 
 /// Hard cap on packages per event, enforced on create.
@@ -18,6 +19,59 @@ pub(crate) const MAX_TIERS_PER_EVENT: usize = 10;
 
 /// Seeded group whose packages must keep the legacy `onsite` category.
 pub(crate) const ONSITE_GROUP_ID: &str = "onsite-physical";
+
+/// Failure modes of a sponsor create.
+#[derive(Debug)]
+pub enum CreateSponsorError {
+    DuplicateName,
+    Db(worker::Error),
+}
+
+impl From<worker::Error> for CreateSponsorError {
+    fn from(err: worker::Error) -> Self {
+        CreateSponsorError::Db(err)
+    }
+}
+
+/// Failure modes of a sponsor update.
+#[derive(Debug)]
+pub enum UpdateSponsorError {
+    NotFound,
+    DuplicateName,
+    Db(worker::Error),
+}
+
+impl From<worker::Error> for UpdateSponsorError {
+    fn from(err: worker::Error) -> Self {
+        UpdateSponsorError::Db(err)
+    }
+}
+
+/// Failure modes of a sponsor delete.
+#[derive(Debug)]
+pub enum DeleteSponsorError {
+    NotFound,
+    Db(worker::Error),
+}
+
+impl From<worker::Error> for DeleteSponsorError {
+    fn from(err: worker::Error) -> Self {
+        DeleteSponsorError::Db(err)
+    }
+}
+
+/// Failure modes of a sponsor reorder.
+#[derive(Debug)]
+pub enum ReorderSponsorsError {
+    InvalidOrder,
+    Db(worker::Error),
+}
+
+impl From<worker::Error> for ReorderSponsorsError {
+    fn from(err: worker::Error) -> Self {
+        ReorderSponsorsError::Db(err)
+    }
+}
 
 /// Failure modes of a group create. `DuplicateLabel` is detected before any
 /// statement runs, so no row is mutated.
@@ -852,6 +906,296 @@ impl SponsorPackageRepository {
         }
 
         Ok(self.list_tiers(event_slug).await?)
+    }
+
+    /// List all sponsors for an event ordered by display_order.
+    pub async fn list_sponsors(&self, event_slug: &str) -> WorkerResult<Vec<EventSponsor>> {
+        let sql = r#"
+            SELECT event_slug, id, name, logo_url, website_url, tier, price_idr,
+                   description, is_active, display_order, created_at, updated_at
+            FROM event_sponsors
+            WHERE event_slug = ?
+            ORDER BY display_order ASC
+        "#;
+        self.db
+            .prepare(sql)
+            .bind(&[JsValue::from_str(event_slug)])?
+            .all()
+            .await?
+            .results()
+    }
+
+    /// List only active sponsors for public consumption.
+    pub async fn list_active_sponsors(&self, event_slug: &str) -> WorkerResult<Vec<EventSponsor>> {
+        let sql = r#"
+            SELECT event_slug, id, name, logo_url, website_url, tier, price_idr,
+                   description, is_active, display_order, created_at, updated_at
+            FROM event_sponsors
+            WHERE event_slug = ? AND is_active = 1
+            ORDER BY display_order ASC
+        "#;
+        self.db
+            .prepare(sql)
+            .bind(&[JsValue::from_str(event_slug)])?
+            .all()
+            .await?
+            .results()
+    }
+
+    /// Create a sponsor for an event. Computes next display_order automatically.
+    pub async fn create_sponsor(
+        &self,
+        event_slug: &str,
+        input: EventSponsorCreate,
+    ) -> Result<EventSponsor, CreateSponsorError> {
+        let existing = self.list_sponsors(event_slug).await?;
+        let name_trim = input.name.trim();
+        if existing
+            .iter()
+            .any(|s| s.name.trim().eq_ignore_ascii_case(name_trim))
+        {
+            return Err(CreateSponsorError::DuplicateName);
+        }
+
+        let taken: HashSet<String> = existing.iter().map(|s| s.id.clone()).collect();
+        let id = generate_unique_id(name_trim, "sponsor", |candidate| taken.contains(candidate))?;
+
+        let max_order = existing.iter().map(|s| s.display_order).max().unwrap_or(0);
+        let display_order = max_order + 1;
+
+        let website_url = match input.website_url.as_deref() {
+            Some(u) if !u.trim().is_empty() => JsValue::from_str(u.trim()),
+            _ => JsValue::NULL,
+        };
+        let description = match input.description.as_deref() {
+            Some(d) if !d.trim().is_empty() => JsValue::from_str(d.trim()),
+            _ => JsValue::NULL,
+        };
+        let price_idr = input.price_idr.unwrap_or(0);
+        let is_active = input.is_active.unwrap_or(true);
+
+        let sql = r#"
+            INSERT INTO event_sponsors
+              (event_slug, id, name, logo_url, website_url, tier, price_idr, description, is_active, display_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#;
+
+        self.db
+            .prepare(sql)
+            .bind(&[
+                JsValue::from_str(event_slug),
+                JsValue::from_str(&id),
+                JsValue::from_str(name_trim),
+                JsValue::from_str(input.logo_url.trim()),
+                website_url,
+                JsValue::from_str(input.tier.trim()),
+                JsValue::from_f64(price_idr as f64),
+                description,
+                JsValue::from_bool(is_active),
+                JsValue::from_f64(display_order as f64),
+            ])?
+            .run()
+            .await?;
+
+        let created = self
+            .db
+            .prepare(
+                r#"
+                SELECT event_slug, id, name, logo_url, website_url, tier, price_idr,
+                       description, is_active, display_order, created_at, updated_at
+                FROM event_sponsors
+                WHERE event_slug = ? AND id = ?
+            "#,
+            )
+            .bind(&[JsValue::from_str(event_slug), JsValue::from_str(&id)])?
+            .first::<EventSponsor>(None)
+            .await?
+            .ok_or_else(|| {
+                worker::Error::RustError("failed to load created sponsor".to_string())
+            })?;
+
+        Ok(created)
+    }
+
+    /// Update a sponsor's detail data, logo, url, tier, price, description, is_active.
+    pub async fn update_sponsor(
+        &self,
+        event_slug: &str,
+        sponsor_id: &str,
+        input: EventSponsorUpdate,
+    ) -> Result<EventSponsor, UpdateSponsorError> {
+        let existing = self.list_sponsors(event_slug).await?;
+        let name_trim = input.name.trim();
+
+        if !existing.iter().any(|s| s.id == sponsor_id) {
+            return Err(UpdateSponsorError::NotFound);
+        }
+
+        if existing
+            .iter()
+            .any(|s| s.id != sponsor_id && s.name.trim().eq_ignore_ascii_case(name_trim))
+        {
+            return Err(UpdateSponsorError::DuplicateName);
+        }
+
+        let website_url = match input.website_url.as_deref() {
+            Some(u) if !u.trim().is_empty() => JsValue::from_str(u.trim()),
+            _ => JsValue::NULL,
+        };
+        let description = match input.description.as_deref() {
+            Some(d) if !d.trim().is_empty() => JsValue::from_str(d.trim()),
+            _ => JsValue::NULL,
+        };
+
+        let sql = r#"
+            UPDATE event_sponsors
+            SET name = ?,
+                logo_url = ?,
+                website_url = ?,
+                tier = ?,
+                price_idr = ?,
+                description = ?,
+                is_active = ?,
+                updated_at = datetime('now')
+            WHERE event_slug = ? AND id = ?
+        "#;
+
+        self.db
+            .prepare(sql)
+            .bind(&[
+                JsValue::from_str(name_trim),
+                JsValue::from_str(input.logo_url.trim()),
+                website_url,
+                JsValue::from_str(input.tier.trim()),
+                JsValue::from_f64(input.price_idr as f64),
+                description,
+                JsValue::from_bool(input.is_active),
+                JsValue::from_str(event_slug),
+                JsValue::from_str(sponsor_id),
+            ])?
+            .run()
+            .await?;
+
+        let updated = self
+            .db
+            .prepare(
+                r#"
+                SELECT event_slug, id, name, logo_url, website_url, tier, price_idr,
+                       description, is_active, display_order, created_at, updated_at
+                FROM event_sponsors
+                WHERE event_slug = ? AND id = ?
+            "#,
+            )
+            .bind(&[JsValue::from_str(event_slug), JsValue::from_str(sponsor_id)])?
+            .first::<EventSponsor>(None)
+            .await?
+            .ok_or_else(|| {
+                worker::Error::RustError("failed to load updated sponsor".to_string())
+            })?;
+
+        Ok(updated)
+    }
+
+    /// Delete a sponsor and pack remaining display orders in two phases.
+    pub async fn delete_sponsor(
+        &self,
+        event_slug: &str,
+        sponsor_id: &str,
+    ) -> Result<(), DeleteSponsorError> {
+        let result = self
+            .db
+            .prepare("DELETE FROM event_sponsors WHERE event_slug = ? AND id = ?")
+            .bind(&[JsValue::from_str(event_slug), JsValue::from_str(sponsor_id)])?
+            .run()
+            .await?;
+        if changed_rows(&result)? == 0 {
+            return Err(DeleteSponsorError::NotFound);
+        }
+
+        let remaining = self.list_sponsors(event_slug).await?;
+        if !remaining.is_empty() {
+            let mut stmts = Vec::with_capacity(remaining.len() * 2);
+            for (i, s) in remaining.iter().enumerate() {
+                stmts.push(
+                    self.db
+                        .prepare(
+                            "UPDATE event_sponsors SET display_order = ? WHERE event_slug = ? AND id = ?",
+                        )
+                        .bind(&[
+                            JsValue::from_f64(-(i as f64) - 1.0),
+                            JsValue::from_str(event_slug),
+                            JsValue::from_str(&s.id),
+                        ])?,
+                );
+            }
+            for (i, s) in remaining.iter().enumerate() {
+                stmts.push(
+                    self.db
+                        .prepare(
+                            "UPDATE event_sponsors SET display_order = ?, updated_at = datetime('now') WHERE event_slug = ? AND id = ?",
+                        )
+                        .bind(&[
+                            JsValue::from_f64((i + 1) as f64),
+                            JsValue::from_str(event_slug),
+                            JsValue::from_str(&s.id),
+                        ])?,
+                );
+            }
+            self.db.batch(stmts).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Batch reorder sponsors using a 2-phase update.
+    pub async fn reorder_sponsors(
+        &self,
+        event_slug: &str,
+        items: &[EventSponsorOrderItem],
+    ) -> Result<Vec<EventSponsor>, ReorderSponsorsError> {
+        let existing = self.list_sponsors(event_slug).await?;
+        if items.len() != existing.len() {
+            return Err(ReorderSponsorsError::InvalidOrder);
+        }
+        let existing_ids: HashSet<&str> = existing.iter().map(|s| s.id.as_str()).collect();
+        for item in items {
+            if !existing_ids.contains(item.id.as_str()) {
+                return Err(ReorderSponsorsError::InvalidOrder);
+            }
+        }
+
+        let mut stmts = Vec::with_capacity(items.len() * 2);
+        // Phase 1: temporary negative orders
+        for (i, item) in items.iter().enumerate() {
+            stmts.push(
+                self.db
+                    .prepare(
+                        "UPDATE event_sponsors SET display_order = ? WHERE event_slug = ? AND id = ?",
+                    )
+                    .bind(&[
+                        JsValue::from_f64(-(i as f64) - 1.0),
+                        JsValue::from_str(event_slug),
+                        JsValue::from_str(&item.id),
+                    ])?,
+            );
+        }
+        // Phase 2: final target orders
+        for item in items {
+            stmts.push(
+                self.db
+                    .prepare(
+                        "UPDATE event_sponsors SET display_order = ?, updated_at = datetime('now') WHERE event_slug = ? AND id = ?",
+                    )
+                    .bind(&[
+                        JsValue::from_f64(item.display_order as f64),
+                        JsValue::from_str(event_slug),
+                        JsValue::from_str(&item.id),
+                    ])?,
+            );
+        }
+        self.db.batch(stmts).await?;
+
+        Ok(self.list_sponsors(event_slug).await?)
     }
 }
 

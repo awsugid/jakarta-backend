@@ -318,6 +318,45 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             },
         )
         // ---------------------------------------------------------------
+        // GET /api/events/:eventSlug/sponsors — public active sponsors
+        // ---------------------------------------------------------------
+        .get_async("/api/events/:eventSlug/sponsors", |req, ctx| async move {
+            crate::http::sponsors::handle_public_sponsors(req, ctx).await
+        })
+        // ---------------------------------------------------------------
+        // Admin — Event Sponsors Management (admin-only)
+        // ---------------------------------------------------------------
+        .get_async(
+            "/api/admin/events/:eventSlug/sponsors",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_list_sponsors(req, ctx).await
+            },
+        )
+        .post_async(
+            "/api/admin/events/:eventSlug/sponsors",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_create_sponsor(req, ctx).await
+            },
+        )
+        .put_async(
+            "/api/admin/events/:eventSlug/sponsors/order",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_reorder_sponsors(req, ctx).await
+            },
+        )
+        .put_async(
+            "/api/admin/events/:eventSlug/sponsors/:sponsorId",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_update_sponsor(req, ctx).await
+            },
+        )
+        .delete_async(
+            "/api/admin/events/:eventSlug/sponsors/:sponsorId",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_delete_sponsor(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
         // CORS preflight for all /api/* routes
         // ---------------------------------------------------------------
         .options("/api/*rest", |_req, ctx| {
