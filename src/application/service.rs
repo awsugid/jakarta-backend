@@ -115,12 +115,19 @@ pub async fn get_form_status_authed(
 }
 
 fn determine_status(form: &ApplicationForm) -> FormPolicyStatus {
-    if policy::is_form_archived(form) {
+    determine_status_at(form, &policy::utc_now_string())
+}
+
+/// Pure-Rust core of `determine_status` (testable without the JS clock).
+/// Archive wins first; acceptance is kind-aware so an inactive volunteer in
+/// its date window reports Open (Talent Pool) while the link endpoint still
+/// permits the submission — status and policy can never disagree.
+fn determine_status_at(form: &ApplicationForm, now: &str) -> FormPolicyStatus {
+    if policy::is_form_archived_at(form, now) {
         FormPolicyStatus::Archived
-    } else if !policy::is_form_open(form) {
-        let now = policy::utc_now_string();
+    } else if !policy::accepting_for_kind_at(form, now) {
         if let Some(ref opens_at) = form.opens_at {
-            if opens_at > &now {
+            if opens_at.as_str() > now {
                 return FormPolicyStatus::NotYetOpen;
             }
         }
@@ -157,7 +164,8 @@ pub async fn list_user_applications(
         let matching_indexes: Vec<_> = indexes.iter().filter(|i| i.form_id == form.id).collect();
 
         for idx in matching_indexes {
-            let editable = policy::is_form_editable(&form);
+            // Volunteer Talent Pool responses stay editable while inactive.
+            let editable = policy::editable_for_kind(&form);
             summaries.push(UserApplicationSummary {
                 kind: form.kind.clone(),
                 slug: form.slug.clone(),
@@ -259,4 +267,82 @@ fn url_encode(s: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::d1::ApplicationForm;
+
+    fn form(kind: &str, is_active: bool) -> ApplicationForm {
+        ApplicationForm {
+            id: format!("f-{kind}"),
+            kind: kind.to_string(),
+            slug: kind.to_string(),
+            title: kind.to_string(),
+            description: None,
+            formbricks_survey_id: "svy".to_string(),
+            formbricks_public_url: None,
+            email_question_id: "q-email".to_string(),
+            linkedin_question_id: "q-linkedin".to_string(),
+            is_active,
+            opens_at: None,
+            closes_at: None,
+            editable_until: None,
+            archive_after: None,
+            display_order: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+        }
+    }
+
+    const NOW: &str = "2026-06-01T00:00:00Z";
+
+    #[test]
+    fn inactive_volunteer_in_window_reports_open_talent_pool() {
+        let f = form("volunteer", false);
+        assert_eq!(determine_status_at(&f, NOW), FormPolicyStatus::Open);
+    }
+
+    #[test]
+    fn inactive_speaker_reports_closed() {
+        let f = form("speaker", false);
+        assert_eq!(determine_status_at(&f, NOW), FormPolicyStatus::Closed);
+    }
+
+    #[test]
+    fn active_forms_report_open() {
+        assert_eq!(
+            determine_status_at(&form("volunteer", true), NOW),
+            FormPolicyStatus::Open
+        );
+        assert_eq!(
+            determine_status_at(&form("speaker", true), NOW),
+            FormPolicyStatus::Open
+        );
+    }
+
+    #[test]
+    fn talent_pool_dates_still_gate_status() {
+        let mut f = form("volunteer", false);
+        f.opens_at = Some("2026-07-01T00:00:00Z".to_string());
+        assert_eq!(determine_status_at(&f, NOW), FormPolicyStatus::NotYetOpen);
+        f.opens_at = None;
+        f.closes_at = Some("2026-05-01T00:00:00Z".to_string());
+        assert_eq!(determine_status_at(&f, NOW), FormPolicyStatus::Closed);
+    }
+
+    #[test]
+    fn archive_wins_over_talent_pool() {
+        let mut f = form("volunteer", false);
+        f.archive_after = Some("2026-05-01T00:00:00Z".to_string());
+        assert_eq!(determine_status_at(&f, NOW), FormPolicyStatus::Archived);
+    }
+
+    #[test]
+    fn active_form_past_closes_is_closed() {
+        let mut f = form("volunteer", true);
+        f.closes_at = Some("2026-05-01T00:00:00Z".to_string());
+        assert_eq!(determine_status_at(&f, NOW), FormPolicyStatus::Closed);
+    }
 }

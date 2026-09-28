@@ -7,8 +7,8 @@ use worker::{D1Database, Result as WorkerResult};
 
 use crate::sponsors::types::{
     EventSponsor, EventSponsorCreate, EventSponsorOrderItem, EventSponsorUpdate, SponsorPackage,
-    SponsorPackageGroup, SponsorPackageGroupUpdate, SponsorPackageUpdate, SponsorTier,
-    SponsorTierUpdate,
+    SponsorPackageCreate, SponsorPackageGroup, SponsorPackageGroupUpdate, SponsorPackageUpdate,
+    SponsorTier, SponsorTierUpdate,
 };
 
 /// Hard cap on packages per event, enforced on create.
@@ -355,7 +355,7 @@ impl SponsorPackageRepository {
     /// List all packages for an event (locked included) ordered by display_order, id.
     pub async fn list_packages(&self, event_slug: &str) -> WorkerResult<Vec<SponsorPackage>> {
         let sql = r#"
-            SELECT id, event_slug, name, advantage, category, group_id, price_idr, minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked, image_url, display_order, updated_at
+            SELECT id, event_slug, name, advantage, category, group_id, price_idr, price_usd, minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked, image_url, display_order, updated_at
             FROM sponsor_packages
             WHERE event_slug = ?
             ORDER BY display_order, id
@@ -423,12 +423,11 @@ impl SponsorPackageRepository {
     pub async fn create_package(
         &self,
         event_slug: &str,
-        name: &str,
-        advantage: &str,
-        group_id: &str,
-        price_idr: i64,
-        image_url: Option<&str>,
+        input: &SponsorPackageCreate,
     ) -> Result<(String, Vec<SponsorPackageGroup>, Vec<SponsorPackage>), CreatePackageError> {
+        let name = input.name.trim();
+        let advantage = input.advantage.trim();
+        let group_id = input.group_id.trim();
         let groups = self.list_groups(event_slug).await?;
         if !groups.iter().any(|g| g.id == group_id) {
             return Err(CreatePackageError::UnknownGroupId(group_id.to_string()));
@@ -453,7 +452,7 @@ impl SponsorPackageRepository {
             packages.iter().any(|p| p.id == candidate)
         })?;
 
-        let image_url_val = match image_url {
+        let image_url_val = match input.image_url.as_deref() {
             Some(url) if !url.trim().is_empty() => JsValue::from_str(url.trim()),
             _ => JsValue::NULL,
         };
@@ -463,9 +462,9 @@ impl SponsorPackageRepository {
                 r#"
                 INSERT INTO sponsor_packages
                     (id, event_slug, name, advantage, category, group_id, price_idr,
-                     minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked,
+                     price_usd, minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked,
                      image_url, display_order, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, ?, ?, datetime('now'))
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, ?, ?, datetime('now'))
             "#,
             )
             .bind(&[
@@ -475,7 +474,11 @@ impl SponsorPackageRepository {
                 JsValue::from_str(advantage),
                 JsValue::from_str(category),
                 JsValue::from_str(group_id),
-                JsValue::from_f64(price_idr as f64),
+                JsValue::from_f64(input.price_idr as f64),
+                input
+                    .price_usd
+                    .map(JsValue::from_f64)
+                    .unwrap_or(JsValue::NULL),
                 image_url_val,
                 JsValue::from_f64(next_order as f64),
             ])?
@@ -576,6 +579,7 @@ impl SponsorPackageRepository {
             SET name = ?,
                 advantage = ?,
                 price_idr = ?,
+                price_usd = ?,
                 minimum_spend_idr = ?,
                 max_sponsors = ?,
                 reserved_sponsors = ?,
@@ -607,6 +611,20 @@ impl SponsorPackageRepository {
         }
         for u in package_updates {
             // NULL unbinds the threshold/cap/group; whole-IDR i64 fits losslessly in f64.
+            // priceUsd is triple-state: omitted keeps the row's current value
+            // (pre-update rows were already read above), null clears, number sets.
+            let existing_price_usd = existing_packages
+                .iter()
+                .find(|p| p.id == u.id)
+                .and_then(|p| p.price_usd);
+            let price_usd = match u.price_usd {
+                Some(requested) => requested,
+                None => existing_price_usd,
+            };
+            let price_usd = match price_usd {
+                Some(v) => JsValue::from_f64(v),
+                None => JsValue::NULL,
+            };
             let minimum_spend_idr = match u.minimum_spend_idr {
                 Some(v) => JsValue::from_f64(v as f64),
                 None => JsValue::NULL,
@@ -627,6 +645,7 @@ impl SponsorPackageRepository {
                 JsValue::from_str(u.name.trim()),
                 JsValue::from_str(u.advantage.trim()),
                 JsValue::from_f64(u.price_idr as f64),
+                price_usd,
                 minimum_spend_idr,
                 max_sponsors,
                 JsValue::from_f64(u.reserved_sponsors as f64),
@@ -725,7 +744,7 @@ impl SponsorPackageRepository {
     /// IS threshold order; there is deliberately no display_order).
     pub async fn list_tiers(&self, event_slug: &str) -> WorkerResult<Vec<SponsorTier>> {
         let sql = r#"
-            SELECT id, event_slug, label, threshold_idr, accent, updated_at
+            SELECT id, event_slug, label, threshold_idr, threshold_usd, accent, updated_at
             FROM sponsor_tiers
             WHERE event_slug = ?
             ORDER BY threshold_idr DESC
@@ -747,6 +766,7 @@ impl SponsorPackageRepository {
         event_slug: &str,
         label: &str,
         threshold_idr: i64,
+        threshold_usd: Option<f64>,
         accent: &str,
     ) -> Result<(String, Vec<SponsorTier>), CreateTierError> {
         let existing = self.list_tiers(event_slug).await?;
@@ -771,8 +791,8 @@ impl SponsorPackageRepository {
             .prepare(
                 r#"
                 INSERT INTO sponsor_tiers
-                    (id, event_slug, label, threshold_idr, accent, updated_at)
-                VALUES (?, ?, ?, ?, ?, datetime('now'))
+                    (id, event_slug, label, threshold_idr, threshold_usd, accent, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
             "#,
             )
             .bind(&[
@@ -780,6 +800,9 @@ impl SponsorPackageRepository {
                 JsValue::from_str(event_slug),
                 JsValue::from_str(label),
                 JsValue::from_f64(threshold_idr as f64),
+                threshold_usd
+                    .map(JsValue::from_f64)
+                    .unwrap_or(JsValue::NULL),
                 JsValue::from_str(accent),
             ])?
             .run()
@@ -833,7 +856,7 @@ impl SponsorPackageRepository {
         let temp_sql = "UPDATE sponsor_tiers SET threshold_idr = ? WHERE event_slug = ? AND id = ?";
         let final_sql = r#"
             UPDATE sponsor_tiers
-            SET label = ?, threshold_idr = ?, accent = ?, updated_at = datetime('now')
+            SET label = ?, threshold_idr = ?, threshold_usd = ?, accent = ?, updated_at = datetime('now')
             WHERE event_slug = ? AND id = ?
         "#;
 
@@ -849,9 +872,24 @@ impl SponsorPackageRepository {
         }
         // Phase two: final positive thresholds, labels, and accents.
         for t in tier_updates {
+            // thresholdUsd is triple-state: omitted keeps the row's current
+            // value, null clears, number sets.
+            let existing_threshold_usd = existing
+                .iter()
+                .find(|tier| tier.id == t.id.trim())
+                .and_then(|tier| tier.threshold_usd);
+            let threshold_usd = match t.threshold_usd {
+                Some(requested) => requested,
+                None => existing_threshold_usd,
+            };
+            let threshold_usd = match threshold_usd {
+                Some(v) => JsValue::from_f64(v),
+                None => JsValue::NULL,
+            };
             statements.push(self.db.prepare(final_sql).bind(&[
                 JsValue::from_str(t.label.trim()),
                 JsValue::from_f64(t.threshold_idr as f64),
+                threshold_usd,
                 JsValue::from_str(&t.accent),
                 JsValue::from_str(event_slug),
                 JsValue::from_str(t.id.trim()),
@@ -1238,6 +1276,7 @@ mod tests {
             event_slug: "community-day-2026".to_string(),
             label: format!("Tier {id}"),
             threshold_idr,
+            threshold_usd: None,
             accent: "default".to_string(),
             updated_at: "2026-01-01 00:00:00".to_string(),
         }
@@ -1248,6 +1287,7 @@ mod tests {
             id: id.to_string(),
             label: format!("Tier {id}"),
             threshold_idr,
+            threshold_usd: None,
             accent: "default".to_string(),
         }
     }
@@ -1296,6 +1336,7 @@ mod tests {
             category: "digital".to_string(),
             group_id: None,
             price_idr: 1_000_000,
+            price_usd: None,
             minimum_spend_idr: None,
             max_sponsors: None,
             reserved_sponsors: 0,
@@ -1312,6 +1353,7 @@ mod tests {
             name: name.to_string(),
             advantage: format!("{name} advantage"),
             price_idr: 1_000_000,
+            price_usd: None,
             minimum_spend_idr: None,
             max_sponsors: None,
             reserved_sponsors: 0,

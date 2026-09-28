@@ -9,9 +9,10 @@ use worker::*;
 use crate::config::AppConfig;
 use crate::formbricks::client::FormbricksClient;
 use crate::formbricks::responses::extract_answers_list;
-use crate::storage::d1::{ApplicationResponseIndex, FormRepository};
+use crate::storage::d1::{ApplicationResponseIndex, FormRepository, ResponseTagRepository};
 use crate::validation::email::normalize_email;
 use crate::validation::linkedin::normalize_linkedin_url;
+use crate::validation::tags::normalize_tags;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -127,20 +128,16 @@ pub async fn handle_webhook(mut req: Request, ctx: RouteContext<()>) -> Result<R
     };
     let repo = FormRepository::new(db);
 
-    // 8. Find corresponding form record by survey ID
-    // We scan forms to find the one with matching formbricks_survey_id
-    let forms = match repo.list_forms(None).await {
+    // 8. Find corresponding form record by survey ID (any is_active state:
+    // Talent Pool volunteer forms are inactive but must still be indexed).
+    let form = match repo.get_form_by_survey_id(&payload.data.survey_id).await {
         Ok(f) => f,
         Err(e) => {
-            console_log!("Failed to list forms in webhook: {}", e);
-            return Response::ok("Database list error");
+            console_log!("Failed to look up form by survey ID in webhook: {}", e);
+            return Response::ok("Database lookup error");
         }
     };
-
-    let form = match forms
-        .into_iter()
-        .find(|f| f.formbricks_survey_id == payload.data.survey_id)
-    {
+    let form = match form {
         Some(f) => f,
         None => {
             console_log!(
@@ -150,6 +147,18 @@ pub async fn handle_webhook(mut req: Request, ctx: RouteContext<()>) -> Result<R
             return Response::ok("Unknown survey");
         }
     };
+
+    // Inactive non-volunteer forms stay fully closed: ignore their submissions
+    // (matches the pre-Talent-Pool behavior where inactive forms were
+    // unreachable through the active-only form scan).
+    if !form.is_active && form.kind != "volunteer" {
+        console_log!(
+            "Webhook ignored for inactive non-volunteer form kind={} slug={}",
+            form.kind,
+            form.slug
+        );
+        return Response::ok("Ignored inactive form");
+    }
 
     // Create a temporary mock response to use our robust extract_answers_list helper
     let mock_response = crate::formbricks::types::FormbricksResponse {
@@ -255,6 +264,36 @@ pub async fn handle_webhook(mut req: Request, ctx: RouteContext<()>) -> Result<R
             return Response::ok("Database error");
         }
 
+        // Talent Pool: a volunteer form that is inactive at submission time
+        // means the applicant joined the pool. The tag is required bookkeeping:
+        // a failure must fail the delivery (5xx) so Formbricks retries. The
+        // index upsert above is idempotent, so retries are safe — they re-index
+        // and re-tag the same response without duplicating anything. Manual
+        // tags are never touched (additive insert only), and old responses are
+        // never reclassified (only responseFinished is handled).
+        if form.kind == "volunteer" && !form.is_active {
+            let tagged = match ctx.d1("DB") {
+                Ok(d) => {
+                    tag_talent_pool(
+                        &ResponseTagRepository::new(d),
+                        &form.formbricks_survey_id,
+                        &payload.data.id,
+                    )
+                    .await
+                }
+                Err(e) => Err(format!("D1 binding failed: {e}")),
+            };
+            if let Err(reason) = tagged {
+                console_log!(
+                    "Talent Pool tag failed for response {} survey {}: {} — failing delivery for retry",
+                    payload.data.id,
+                    form.formbricks_survey_id,
+                    reason
+                );
+                return Response::error("Talent Pool tag failed", 500);
+            }
+        }
+
         // Delete old responses in the index for the same form + email (enforce 1-per-user for volunteers)
         if is_volunteer {
             if let Err(e) = repo
@@ -267,4 +306,30 @@ pub async fn handle_webhook(mut req: Request, ctx: RouteContext<()>) -> Result<R
     }
 
     Response::ok("Processed")
+}
+
+/// Canonical label for talent-pool submissions recorded by the webhook.
+const TALENT_POOL_TAG: &str = "Talent Pool";
+
+/// Add the Talent Pool tag to a response without touching its other tags.
+/// Reuses the survey's established spelling of the label when one exists
+/// (same canonicalization as the admin tags endpoint).
+/// Returns Err(reason) when the tag could not be recorded — the caller must
+/// then fail the delivery so Formbricks retries.
+async fn tag_talent_pool(
+    repo: &ResponseTagRepository,
+    survey_id: &str,
+    response_id: &str,
+) -> Result<(), String> {
+    let existing = repo
+        .list_survey_tags(survey_id)
+        .await
+        .map_err(|e| format!("survey tag list failed: {e}"))?;
+    let mut labels = normalize_tags(&[TALENT_POOL_TAG.to_string()], &existing)
+        .map_err(|e| format!("tag normalization failed: {e}"))?;
+    let label = labels.remove(0);
+    repo.add_response_tag_if_missing(survey_id, response_id, &label)
+        .await
+        .map_err(|e| format!("tag insert failed: {e}"))?;
+    Ok(())
 }

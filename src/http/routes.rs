@@ -146,6 +146,15 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                 crate::http::admin::handle_admin_response_detail(req, ctx).await
             },
         )
+        .get_async("/api/admin/formbricks/tags", |req, ctx| async move {
+            crate::http::admin::handle_admin_survey_tags(req, ctx).await
+        })
+        .put_async(
+            "/api/admin/formbricks/responses/:responseId/tags",
+            |req, ctx| async move {
+                crate::http::admin::handle_admin_replace_response_tags(req, ctx).await
+            },
+        )
         // ---------------------------------------------------------------
         // GET /api/pretix/me/orders — authenticated user order history
         // ---------------------------------------------------------------
@@ -693,7 +702,9 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                 });
 
                 let result = if mode.as_deref() == Some("edit") {
-                    if !policy::is_form_editable(&form) {
+                    // Volunteer Talent Pool responses stay editable while the
+                    // form is inactive; speaker keeps the strict gate.
+                    if !policy::editable_for_kind(&form) {
                         return Err(AppError::Forbidden(
                             "This form is currently closed and no longer editable.".to_string(),
                         )
@@ -726,9 +737,10 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                         "response_id": response_id,
                     })
                 } else {
-                    // Check that the form is open
-                    let is_open = policy::is_form_open(&form);
-                    if !is_open {
+                    // Volunteer: is_active=false is Talent Pool mode, not a
+                    // closure — submissions stay open within the date window.
+                    // Speaker: is_active=false keeps the form closed.
+                    if !policy::accepting_for_kind(&form) {
                         return Err(AppError::Forbidden(
                             "This form is currently closed and no longer editable.".to_string(),
                         )
@@ -745,7 +757,7 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
 
                     serde_json::json!({
                         "url": prefilled_url,
-                        "editable": policy::is_form_editable(&form),
+                        "editable": policy::editable_for_kind(&form),
                     })
                 };
 
