@@ -260,7 +260,14 @@ pub async fn handle_admin_create_sponsor_package(
     let repo = SponsorPackageRepository::new(db);
 
     let (package_id, groups, packages) = repo
-        .create_package(event_slug, name, advantage, group_id, input.price_idr)
+        .create_package(
+            event_slug,
+            name,
+            advantage,
+            group_id,
+            input.price_idr,
+            input.image_url.as_deref(),
+        )
         .await
         .map_err(|e| match e {
             CreatePackageError::DuplicateName => AppError::Conflict(format!(
@@ -1253,6 +1260,7 @@ mod tests {
             advantage: advantage.to_string(),
             group_id: group_id.to_string(),
             price_idr,
+            image_url: None,
         }
     }
 
@@ -1420,6 +1428,7 @@ mod tests {
             reserved_sponsors,
             is_unlocked,
             group_id: None,
+            image_url: None,
         }
     }
 
