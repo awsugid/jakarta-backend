@@ -253,7 +253,6 @@ pub async fn handle_admin_create_sponsor_package(
     let input: SponsorPackageCreate = serde_json::from_slice(&bytes).map_err(AppError::from)?;
     validate_package_create(event_slug, &input)?;
     let name = input.name.trim();
-    let advantage = input.advantage.trim();
     let group_id = input.group_id.trim();
 
     let db = ctx
@@ -262,7 +261,7 @@ pub async fn handle_admin_create_sponsor_package(
     let repo = SponsorPackageRepository::new(db);
 
     let (package_id, groups, packages) = repo
-        .create_package(event_slug, name, advantage, group_id, input.price_idr, input.price_usd)
+        .create_package(event_slug, &input)
         .await
         .map_err(|e| match e {
             CreatePackageError::DuplicateName => AppError::Conflict(format!(
@@ -1286,6 +1285,7 @@ mod tests {
             group_id: group_id.to_string(),
             price_idr,
             price_usd: None,
+            image_url: None,
         }
     }
 
@@ -1454,6 +1454,7 @@ mod tests {
             reserved_sponsors,
             is_unlocked,
             group_id: None,
+            image_url: None,
         }
     }
 

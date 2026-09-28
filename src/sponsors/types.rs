@@ -49,6 +49,8 @@ pub struct SponsorPackage {
     pub reserved_sponsors: i64,
     #[serde(alias = "is_unlocked", deserialize_with = "deserialize_d1_bool")]
     pub is_unlocked: bool,
+    #[serde(alias = "image_url")]
+    pub image_url: Option<String>,
     #[serde(alias = "display_order")]
     pub display_order: i32,
     #[serde(alias = "updated_at")]
@@ -80,6 +82,8 @@ pub struct SponsorPackageUpdate {
     /// Target group id; must reference an existing group for the event.
     /// Null/missing clears the assignment.
     pub group_id: Option<String>,
+    /// Placement visual image URL.
+    pub image_url: Option<String>,
 }
 
 /// POST /api/admin/events/:eventSlug/sponsor-packages body. The server owns
@@ -96,6 +100,8 @@ pub struct SponsorPackageCreate {
     /// Optional manual USD price override in 0.01..=1_000_000; omitted or
     /// null = no override (use the exchange-rate estimate).
     pub price_usd: Option<f64>,
+    /// Optional placement visual image URL.
+    pub image_url: Option<String>,
 }
 
 /// Entry of the groups array of the admin PUT body (rename/reorder only;
@@ -387,6 +393,7 @@ mod tests {
             max_sponsors: Some(5),
             reserved_sponsors: 2,
             is_unlocked: true,
+            image_url: None,
             display_order: 5,
             updated_at: "2026-09-02 12:34:56".into(),
         };
@@ -561,6 +568,7 @@ mod tests {
             max_sponsors: None,
             reserved_sponsors: 0,
             is_unlocked: true,
+            image_url: None,
             display_order: 1,
             updated_at: "2026-09-02 12:34:56".into(),
         };

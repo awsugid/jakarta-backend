@@ -7,8 +7,8 @@ use worker::{D1Database, Result as WorkerResult};
 
 use crate::sponsors::types::{
     EventSponsor, EventSponsorCreate, EventSponsorOrderItem, EventSponsorUpdate, SponsorPackage,
-    SponsorPackageGroup, SponsorPackageGroupUpdate, SponsorPackageUpdate, SponsorTier,
-    SponsorTierUpdate,
+    SponsorPackageCreate, SponsorPackageGroup, SponsorPackageGroupUpdate, SponsorPackageUpdate,
+    SponsorTier, SponsorTierUpdate,
 };
 
 /// Hard cap on packages per event, enforced on create.
@@ -355,7 +355,7 @@ impl SponsorPackageRepository {
     /// List all packages for an event (locked included) ordered by display_order, id.
     pub async fn list_packages(&self, event_slug: &str) -> WorkerResult<Vec<SponsorPackage>> {
         let sql = r#"
-            SELECT id, event_slug, name, advantage, category, group_id, price_idr, price_usd, minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked, display_order, updated_at
+            SELECT id, event_slug, name, advantage, category, group_id, price_idr, price_usd, minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked, image_url, display_order, updated_at
             FROM sponsor_packages
             WHERE event_slug = ?
             ORDER BY display_order, id
@@ -423,12 +423,11 @@ impl SponsorPackageRepository {
     pub async fn create_package(
         &self,
         event_slug: &str,
-        name: &str,
-        advantage: &str,
-        group_id: &str,
-        price_idr: i64,
-        price_usd: Option<f64>,
+        input: &SponsorPackageCreate,
     ) -> Result<(String, Vec<SponsorPackageGroup>, Vec<SponsorPackage>), CreatePackageError> {
+        let name = input.name.trim();
+        let advantage = input.advantage.trim();
+        let group_id = input.group_id.trim();
         let groups = self.list_groups(event_slug).await?;
         if !groups.iter().any(|g| g.id == group_id) {
             return Err(CreatePackageError::UnknownGroupId(group_id.to_string()));
@@ -453,14 +452,19 @@ impl SponsorPackageRepository {
             packages.iter().any(|p| p.id == candidate)
         })?;
 
+        let image_url_val = match input.image_url.as_deref() {
+            Some(url) if !url.trim().is_empty() => JsValue::from_str(url.trim()),
+            _ => JsValue::NULL,
+        };
+
         self.db
             .prepare(
                 r#"
                 INSERT INTO sponsor_packages
                     (id, event_slug, name, advantage, category, group_id, price_idr,
                      price_usd, minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked,
-                     display_order, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, ?, datetime('now'))
+                     image_url, display_order, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, ?, ?, datetime('now'))
             "#,
             )
             .bind(&[
@@ -470,8 +474,12 @@ impl SponsorPackageRepository {
                 JsValue::from_str(advantage),
                 JsValue::from_str(category),
                 JsValue::from_str(group_id),
-                JsValue::from_f64(price_idr as f64),
-                price_usd.map(JsValue::from_f64).unwrap_or(JsValue::NULL),
+                JsValue::from_f64(input.price_idr as f64),
+                input
+                    .price_usd
+                    .map(JsValue::from_f64)
+                    .unwrap_or(JsValue::NULL),
+                image_url_val,
                 JsValue::from_f64(next_order as f64),
             ])?
             .run()
@@ -577,6 +585,7 @@ impl SponsorPackageRepository {
                 reserved_sponsors = ?,
                 is_unlocked = ?,
                 group_id = ?,
+                image_url = ?,
                 updated_at = datetime('now')
             WHERE event_slug = ? AND id = ?
         "#;
@@ -628,6 +637,10 @@ impl SponsorPackageRepository {
                 Some(g) => JsValue::from_str(g.trim()),
                 None => JsValue::NULL,
             };
+            let image_url = match u.image_url.as_deref() {
+                Some(url) if !url.trim().is_empty() => JsValue::from_str(url.trim()),
+                _ => JsValue::NULL,
+            };
             let stmt = self.db.prepare(package_sql).bind(&[
                 JsValue::from_str(u.name.trim()),
                 JsValue::from_str(u.advantage.trim()),
@@ -638,6 +651,7 @@ impl SponsorPackageRepository {
                 JsValue::from_f64(u.reserved_sponsors as f64),
                 JsValue::from_bool(u.is_unlocked),
                 group_id,
+                image_url,
                 JsValue::from_str(event_slug),
                 JsValue::from_str(&u.id),
             ])?;
@@ -1327,6 +1341,7 @@ mod tests {
             max_sponsors: None,
             reserved_sponsors: 0,
             is_unlocked: true,
+            image_url: None,
             display_order: 1,
             updated_at: "2026-01-01 00:00:00".to_string(),
         }
@@ -1344,6 +1359,7 @@ mod tests {
             reserved_sponsors: 0,
             is_unlocked: true,
             group_id: None,
+            image_url: None,
         }
     }
 
