@@ -13,10 +13,9 @@ use crate::sponsors::repository::{
     MAX_PACKAGES_PER_EVENT, MAX_TIERS_PER_EVENT,
 };
 use crate::sponsors::types::{
-    EventSponsor, EventSponsorCreate, EventSponsorReorderBody, EventSponsorUpdate,
-    EventSponsorsResponse, SponsorPackageBatchUpdate, SponsorPackageCreate,
-    SponsorPackageGroupCreate, SponsorPackagesResponse, SponsorSettingsUpdate,
-    SponsorTierBatchUpdate, SponsorTierCreate,
+    EventSponsorCreate, EventSponsorReorderBody, EventSponsorUpdate, EventSponsorsResponse,
+    SponsorPackageBatchUpdate, SponsorPackageCreate, SponsorPackageGroupCreate,
+    SponsorPackagesResponse, SponsorSettingsUpdate, SponsorTierBatchUpdate, SponsorTierCreate,
 };
 
 const MAX_PACKAGES_PER_UPDATE: usize = 50;
@@ -800,7 +799,7 @@ pub async fn handle_admin_create_sponsor(
         );
     }
     if let Some(price) = input.price_idr {
-        if price < 0 || price > 1_000_000_000 {
+        if !(0..=1_000_000_000).contains(&price) {
             return Err(AppError::BadRequest(
                 "Price must be between 0 and 1,000,000,000 IDR".to_string(),
             )
@@ -817,9 +816,9 @@ pub async fn handle_admin_create_sponsor(
         .create_sponsor(event_slug, input)
         .await
         .map_err(|e| match e {
-            CreateSponsorError::DuplicateName => {
-                AppError::Conflict("A sponsor with this name already exists for this event".to_string())
-            }
+            CreateSponsorError::DuplicateName => AppError::Conflict(
+                "A sponsor with this name already exists for this event".to_string(),
+            ),
             CreateSponsorError::Db(e) => AppError::Internal(e.to_string()),
         })?;
 
@@ -870,7 +869,7 @@ pub async fn handle_admin_update_sponsor(
             AppError::BadRequest("Tier must be between 1 and 50 characters".to_string()).into(),
         );
     }
-    if input.price_idr < 0 || input.price_idr > 1_000_000_000 {
+    if !(0..=1_000_000_000).contains(&input.price_idr) {
         return Err(AppError::BadRequest(
             "Price must be between 0 and 1,000,000,000 IDR".to_string(),
         )
@@ -886,12 +885,12 @@ pub async fn handle_admin_update_sponsor(
         .update_sponsor(event_slug, sponsor_id.trim(), input)
         .await
         .map_err(|e| match e {
-            UpdateSponsorError::NotFound => {
-                AppError::NotFound(format!("Sponsor '{sponsor_id}' not found for event {event_slug}"))
-            }
-            UpdateSponsorError::DuplicateName => {
-                AppError::Conflict("Another sponsor with this name already exists for this event".to_string())
-            }
+            UpdateSponsorError::NotFound => AppError::NotFound(format!(
+                "Sponsor '{sponsor_id}' not found for event {event_slug}"
+            )),
+            UpdateSponsorError::DuplicateName => AppError::Conflict(
+                "Another sponsor with this name already exists for this event".to_string(),
+            ),
             UpdateSponsorError::Db(e) => AppError::Internal(e.to_string()),
         })?;
 
@@ -922,9 +921,9 @@ pub async fn handle_admin_delete_sponsor(req: Request, ctx: RouteContext<()>) ->
     repo.delete_sponsor(event_slug, sponsor_id.trim())
         .await
         .map_err(|e| match e {
-            DeleteSponsorError::NotFound => {
-                AppError::NotFound(format!("Sponsor '{sponsor_id}' not found for event {event_slug}"))
-            }
+            DeleteSponsorError::NotFound => AppError::NotFound(format!(
+                "Sponsor '{sponsor_id}' not found for event {event_slug}"
+            )),
             DeleteSponsorError::Db(e) => AppError::Internal(e.to_string()),
         })?;
 

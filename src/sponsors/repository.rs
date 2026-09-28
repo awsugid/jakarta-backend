@@ -962,16 +962,20 @@ impl SponsorPackageRepository {
 
         let created = self
             .db
-            .prepare(r#"
+            .prepare(
+                r#"
                 SELECT event_slug, id, name, logo_url, website_url, tier, price_idr,
                        description, is_active, display_order, created_at, updated_at
                 FROM event_sponsors
                 WHERE event_slug = ? AND id = ?
-            "#)
+            "#,
+            )
             .bind(&[JsValue::from_str(event_slug), JsValue::from_str(&id)])?
             .first::<EventSponsor>(None)
             .await?
-            .ok_or_else(|| worker::Error::RustError("failed to load created sponsor".to_string()))?;
+            .ok_or_else(|| {
+                worker::Error::RustError("failed to load created sponsor".to_string())
+            })?;
 
         Ok(created)
     }
@@ -1037,16 +1041,20 @@ impl SponsorPackageRepository {
 
         let updated = self
             .db
-            .prepare(r#"
+            .prepare(
+                r#"
                 SELECT event_slug, id, name, logo_url, website_url, tier, price_idr,
                        description, is_active, display_order, created_at, updated_at
                 FROM event_sponsors
                 WHERE event_slug = ? AND id = ?
-            "#)
+            "#,
+            )
             .bind(&[JsValue::from_str(event_slug), JsValue::from_str(sponsor_id)])?
             .first::<EventSponsor>(None)
             .await?
-            .ok_or_else(|| worker::Error::RustError("failed to load updated sponsor".to_string()))?;
+            .ok_or_else(|| {
+                worker::Error::RustError("failed to load updated sponsor".to_string())
+            })?;
 
         Ok(updated)
     }
