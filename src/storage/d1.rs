@@ -787,3 +787,84 @@ impl ResponseTagRepository {
         Ok(())
     }
 }
+
+/// One cached row of survey_response_counts. `fresh` is computed SQL-side
+/// (`refreshed_at >= datetime('now', '-<ttl> seconds')`) so all wall-clock
+/// math stays in SQLite UTC time.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SurveyCountEntry {
+    pub survey_id: String,
+    pub response_count: u64,
+    #[serde(deserialize_with = "deserialize_d1_bool")]
+    pub fresh: bool,
+}
+
+/// D1-backed cache of per-survey Formbricks response counts (migration 0016).
+///
+/// Written only after a successful full upstream walk (prime from the admin
+/// responses listing, refresh from the admin forms list); read by the forms
+/// list (fresh = serve, expired = one synchronous refresh) and the toggle
+/// (cached-only, fresh or stale). Failed refreshes never write, so a stale
+/// row survives and its TTL clock does not advance.
+pub struct SurveyCountCache {
+    db: D1Database,
+}
+
+impl SurveyCountCache {
+    pub fn new(db: D1Database) -> Self {
+        Self { db }
+    }
+
+    /// All cached rows with freshness flags. Table is tiny (one row per
+    /// distinct survey), so a full scan beats per-form lookups.
+    pub async fn list_with_freshness(
+        &self,
+        ttl_seconds: i64,
+    ) -> WorkerResult<Vec<SurveyCountEntry>> {
+        let sql = format!(
+            "SELECT survey_id, response_count, \
+             refreshed_at >= datetime('now', '-{ttl_seconds} seconds') AS fresh \
+             FROM survey_response_counts"
+        );
+        let result = self.db.prepare(&sql).all().await?;
+        result.results::<SurveyCountEntry>()
+    }
+
+    /// One cached row regardless of freshness (toggle path: flipping
+    /// recruitment status never changes the count, so stale is fine).
+    pub async fn get(
+        &self,
+        survey_id: &str,
+        ttl_seconds: i64,
+    ) -> WorkerResult<Option<SurveyCountEntry>> {
+        let sql = format!(
+            "SELECT survey_id, response_count, \
+             refreshed_at >= datetime('now', '-{ttl_seconds} seconds') AS fresh \
+             FROM survey_response_counts WHERE survey_id = ?"
+        );
+        self.db
+            .prepare(&sql)
+            .bind(&[JsValue::from_str(survey_id)])?
+            .first::<SurveyCountEntry>(None)
+            .await
+    }
+
+    /// Store a count from a successful full walk; refreshes the TTL clock.
+    pub async fn put(&self, survey_id: &str, response_count: u64) -> WorkerResult<()> {
+        self.db
+            .prepare(
+                "INSERT INTO survey_response_counts (survey_id, response_count, refreshed_at) \
+                 VALUES (?, ?, datetime('now')) \
+                 ON CONFLICT(survey_id) DO UPDATE SET \
+                 response_count = excluded.response_count, \
+                 refreshed_at = excluded.refreshed_at",
+            )
+            .bind(&[
+                JsValue::from_str(survey_id),
+                JsValue::from_f64(response_count as f64),
+            ])?
+            .run()
+            .await?;
+        Ok(())
+    }
+}

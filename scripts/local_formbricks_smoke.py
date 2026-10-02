@@ -70,6 +70,7 @@ def survey_body(sid):
                      "questions": [{"id": "q-email", "headline": {"default": "Email"}, "type": "email"}]}}
 
 PAGE_HITS = []  # (surveyId, limit, skip) in order — inspected to prove the no-gap walk
+FAIL_SURVEYS = set()  # surveys the fake upstream 500s (failure injection)
 
 class MockHandler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -81,6 +82,8 @@ class MockHandler(BaseHTTPRequestHandler):
             sid = q.get("surveyId", [""])[0]
             if sid not in SURVEYS:
                 self.send_response(404); self.end_headers(); return
+            if sid in FAIL_SURVEYS:
+                self.send_response(500); self.end_headers(); return
             limit = int(q.get("limit", ["100"])[0])
             skip = int(q.get("skip", ["0"])[0])
             PAGE_HITS.append((sid, limit, skip))
@@ -328,6 +331,56 @@ def main():
         st, body = http("PUT", base + "/api/admin/forms/volunteer/vtalent", AUTH, {"is_active": False})
         check("toggle vtalent -> 200 with live count 0",
               st == 200 and body.get("response_count") == 0, str(body)[:200])
+
+        # 10b. count cache: fresh cache hits and toggles make ZERO upstream walks
+        before = len(PAGE_HITS)
+        st, forms2 = http("GET", base + "/api/admin/forms", AUTH)
+        check("second admin forms GET -> zero upstream response pages",
+              st == 200 and len(PAGE_HITS) == before,
+              f"surveys refetched={[h[0] for h in PAGE_HITS[before:]]}")
+        before = len(PAGE_HITS)
+        st, body = http("PUT", base + "/api/admin/forms/volunteer/vact", AUTH, {"is_active": True})
+        check("toggle vact cached-only -> zero upstream pages, count from cache",
+              st == 200 and len(PAGE_HITS) == before and body.get("response_count") == 2
+              and body.get("is_active") is True, str(body)[:120])
+
+        # 10c. TTL expiry: backdate every row past the 5-min TTL, then ONE
+        # synchronous refresh walk per distinct survey on the next GET
+        backdate = os.path.join(state, "backdate_counts.sql")
+        with open(backdate, "w") as f:
+            f.write("UPDATE survey_response_counts SET refreshed_at = datetime('now', '-10 minutes');\n")
+        rc = run(wrangler + ["d1", "execute", "jakarta-backend", "--local",
+                             "--persist-to", state, "--file", backdate], 240,
+                 os.path.join(state, "backdate.log"))
+        check("backdate count cache rows", rc == 0)
+        before = len(PAGE_HITS)
+        st, forms3 = http("GET", base + "/api/admin/forms", AUTH)
+        by3 = {f.get("slug"): f.get("response_count") for f in forms3 if isinstance(f, dict)}
+        okcase_pages = [s for sid, _, s in PAGE_HITS[before:] if sid == "okcase"]
+        check("expired cache -> one synchronous refresh walk per survey",
+              st == 200 and len(PAGE_HITS) > before and by3.get("vact") == 2
+              and okcase_pages == [0],
+              f"refetched={[h[0] for h in PAGE_HITS[before:]]} vact={by3.get('vact')}")
+
+        # 10d. refresh failure: stale value served (never null/0), freshness
+        # NOT advanced -> next GET retries once upstream recovers
+        with open(backdate, "w") as f:
+            f.write("UPDATE survey_response_counts SET refreshed_at = datetime('now', '-10 minutes') WHERE survey_id = 'okcase';\n")
+        rc = run(wrangler + ["d1", "execute", "jakarta-backend", "--local",
+                             "--persist-to", state, "--file", backdate], 240,
+                 os.path.join(state, "backdate2.log"))
+        check("backdate okcase row", rc == 0)
+        FAIL_SURVEYS.add("okcase")
+        st, forms4 = http("GET", base + "/api/admin/forms", AUTH)
+        by4 = {f.get("slug"): f.get("response_count") for f in forms4 if isinstance(f, dict)}
+        check("upstream failure on expired row -> stale count retained",
+              st == 200 and by4.get("vact") == 2, str(by4.get("vact")))
+        FAIL_SURVEYS.discard("okcase")
+        SURVEYS["okcase"]["responses"].append(make_response("r3"))
+        st, forms5 = http("GET", base + "/api/admin/forms", AUTH)
+        by5 = {f.get("slug"): f.get("response_count") for f in forms5 if isinstance(f, dict)}
+        check("failed refresh kept row expired -> success refetches to 3",
+              st == 200 and by5.get("vact") == 3, str(by5.get("vact")))
 
         # 11. public listings expose inactive volunteer (Talent Pool), not inactive speaker
         st, vforms = http("GET", base + "/api/forms?kind=volunteer")

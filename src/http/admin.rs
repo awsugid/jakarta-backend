@@ -9,12 +9,19 @@ use crate::formbricks::responses::extract_answers_list;
 use crate::formbricks::types::{FormbricksResponse, FormbricksSurvey};
 use crate::http::errors::AppError;
 use crate::http::response::json_success_cors;
-use crate::storage::d1::{FormRepository, ResponseTagRepository};
+use crate::storage::d1::{FormRepository, ResponseTagRepository, SurveyCountCache};
 use crate::validation::tags::normalize_tags;
 
 /// Safety cap for the live Formbricks walks backing admin response counts
 /// (100 pages × limit 100 = 10k responses per survey).
 const FORMS_COUNT_MAX_WALK_PAGES: u32 = 100;
+
+/// Survey response counts are cached in D1 (migration 0016) and served
+/// without upstream walks while younger than this. Counts may therefore lag
+/// live submissions by up to this TTL (no SWR: expiry is paid synchronously
+/// by the next request). Webhooks do NOT bump the cache — the index they
+/// write is incomplete, so counts refresh only via full walks.
+const COUNT_CACHE_TTL_SECONDS: i64 = 300;
 
 #[derive(Serialize)]
 struct AdminMe {
@@ -60,10 +67,14 @@ pub struct AdminUpdateFormStatusInput {
 
 /// GET /api/admin/forms — list all application_forms (all kinds, active and inactive).
 ///
-/// `response_count` reflects ALL live Formbricks responses for the form's
-/// survey (finished + in-progress), NOT the partial D1 index. A per-form
-/// upstream failure yields `null` — never a misleading zero. Shared survey IDs
-/// are counted once.
+/// `response_count` is served from a D1 cache (migration 0016) of FULL live
+/// Formbricks walks (finished + in-progress), NOT the partial D1 index, and
+/// may lag live submissions by up to COUNT_CACHE_TTL_SECONDS. Fresh rows are
+/// served with zero upstream calls; expired or missing rows cost exactly one
+/// synchronous full walk per distinct survey per request (shared survey IDs
+/// count once). An upstream failure on refresh serves the stale cached value,
+/// or `null` when none exists — never a misleading zero — and does not
+/// advance refreshed_at, so the next request retries.
 pub async fn handle_admin_forms(req: Request, ctx: RouteContext<()>) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
     let db_opt = ctx.d1("DB").ok();
@@ -80,33 +91,71 @@ pub async fn handle_admin_forms(req: Request, ctx: RouteContext<()>) -> Result<R
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    // ponytail: sequential per-distinct-survey walks; N forms × pages of
-    // upstream fetches per request. Fine at ~13 forms with 1–2 pages each;
-    // if surveys grow past the Workers subrequest budget, cache counts in D1
-    // with a short TTL instead.
+    // Response counts from the D1 cache: fresh rows serve as-is; expired or
+    // missing rows refresh with ONE full walk per distinct survey (no SWR,
+    // no background refresh — first load/expiry pays the walk synchronously).
+    // A cache-write failure never fails the request; the count still serves.
     let client = FormbricksClient::new(&config);
+    let cache = SurveyCountCache::new(
+        ctx.d1("DB")
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+    );
+    let cached: HashMap<String, (u64, bool)> = cache
+        .list_with_freshness(COUNT_CACHE_TTL_SECONDS)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|r| (r.survey_id, (r.response_count, r.fresh)))
+                .collect()
+        })
+        .unwrap_or_else(|e| {
+            console_log!("survey count cache read failed: {e}");
+            HashMap::new()
+        });
+
     let mut count_cache: HashMap<String, Option<u64>> = HashMap::new();
     for f in &forms {
-        if !count_cache.contains_key(&f.formbricks_survey_id) {
-            let count = match client
-                .get_all_responses(&f.formbricks_survey_id, FORMS_COUNT_MAX_WALK_PAGES)
+        if count_cache.contains_key(&f.formbricks_survey_id) {
+            continue;
+        }
+        let sid = f.formbricks_survey_id.clone();
+        let fresh = cached
+            .get(&sid)
+            .filter(|(_, fresh)| *fresh)
+            .map(|(count, _)| *count);
+        // Last success if the row is expired (served only if refresh fails);
+        // None when there is no row at all.
+        let stale = cached
+            .get(&sid)
+            .filter(|(_, fresh)| !*fresh)
+            .map(|(count, _)| *count);
+        let count = match fresh {
+            Some(n) => Some(n),
+            None => match client
+                .get_all_responses(&sid, FORMS_COUNT_MAX_WALK_PAGES)
                 .await
             {
-                Ok(all) => Some(all.len() as u64),
+                Ok(all) => {
+                    let n = all.len() as u64;
+                    if let Err(e) = cache.put(&sid, n).await {
+                        console_log!("survey count cache write failed: survey={sid}: {e}");
+                    }
+                    Some(n)
+                }
                 // Log identifiers only — no PII in logs.
                 Err(e) => {
                     console_log!(
-                        "response count fetch failed: kind={} slug={} survey={}: {}",
+                        "response count refresh failed, serving stale: kind={} slug={} survey={}: {}",
                         f.kind,
                         f.slug,
-                        f.formbricks_survey_id,
+                        sid,
                         e
                     );
-                    None
+                    stale
                 }
-            };
-            count_cache.insert(f.formbricks_survey_id.clone(), count);
-        }
+            },
+        };
+        count_cache.insert(sid, count);
     }
 
     let items: Vec<AdminFormSummary> = forms
@@ -130,6 +179,11 @@ pub async fn handle_admin_forms(req: Request, ctx: RouteContext<()>) -> Result<R
 }
 
 /// PUT /api/admin/forms/:kind/:slug — update form active status (open/closed) (admin-only).
+///
+/// `response_count` is read cached-ONLY (fresh or stale, migration 0016):
+/// flipping recruitment status never changes the response count, so the
+/// toggle never walks upstream. A survey with no cache entry yet serves
+/// `null` — never a misleading zero.
 pub async fn handle_admin_update_form_status(
     mut req: Request,
     ctx: RouteContext<()>,
@@ -162,17 +216,20 @@ pub async fn handle_admin_update_form_status(
         .map_err(|e| AppError::Internal(e.to_string()))?
         .ok_or_else(|| AppError::NotFound(format!("Form {}/{} not found", kind, slug)))?;
 
-    // The toggle already mutated state: a count failure must NOT fail the
-    // request. Fall back to null and log identifiers only (no PII).
-    let client = FormbricksClient::new(&config);
-    let response_count = match client
-        .get_all_responses(&updated.formbricks_survey_id, FORMS_COUNT_MAX_WALK_PAGES)
+    // The toggle already mutated state: a cache read failure must NOT fail
+    // the request. Cached-only — no upstream walk (see handler docs).
+    let cache = SurveyCountCache::new(
+        ctx.d1("DB")
+            .map_err(|e| AppError::Internal(e.to_string()))?,
+    );
+    let response_count = match cache
+        .get(&updated.formbricks_survey_id, COUNT_CACHE_TTL_SECONDS)
         .await
     {
-        Ok(all) => Some(all.len() as u64),
+        Ok(entry) => entry.map(|e| e.response_count),
         Err(e) => {
             console_log!(
-                "response count fetch failed after toggle: kind={} slug={} survey={}: {}",
+                "survey count cache read failed after toggle: kind={} slug={} survey={}: {}",
                 updated.kind,
                 updated.slug,
                 updated.formbricks_survey_id,
@@ -289,6 +346,18 @@ pub async fn handle_admin_responses(req: Request, ctx: RouteContext<()>) -> Resu
         .get_all_responses(&survey_id, LIST_MAX_WALK_PAGES)
         .await
         .map_err(|e| AppError::FormBricksError(format!("Failed to fetch responses: {e}")))?;
+
+    // The walk already fetched the unfiltered full set — prime the count
+    // cache (migration 0016) best-effort BEFORE any filtering windows it
+    // down. A cache write failure must not fail this listing.
+    if let Ok(db) = ctx.d1("DB") {
+        if let Err(e) = SurveyCountCache::new(db)
+            .put(&survey_id, all.len() as u64)
+            .await
+        {
+            console_log!("survey count cache prime failed: survey={survey_id}: {e}");
+        }
+    };
     let tag_members = allowed_tag_members(&tag_filter, &tag_rows, &all);
     let (data, stats) =
         filter_and_window(all, finished_filter, tag_members.as_ref(), offset, limit);
