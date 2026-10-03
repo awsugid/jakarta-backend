@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use sha2::{Digest, Sha256};
 use worker::*;
 
 use crate::auth::admin::require_admin;
@@ -987,6 +988,114 @@ pub async fn handle_admin_reorder_sponsors(
         sponsors: &sponsors,
     };
     json_success_cors(&body, &config.allowed_origins, origin.as_deref())
+}
+
+#[derive(serde::Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SponsorMockupUploadResponse {
+    pub url: String,
+    pub key: String,
+}
+
+/// POST /api/admin/events/:eventSlug/sponsor-mockup — Upload a sponsor placement
+/// mockup visual image (PNG, JPEG, WebP <= 2MB) to Cloudflare R2 (admin-only).
+/// Supports optional `?path=` query parameter to customize destination folder
+/// (e.g. `?path=comday-26` or default `comday-26` for community-day-2026).
+pub async fn handle_admin_upload_sponsor_mockup(
+    mut req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+    validate_event_slug(event_slug)?;
+
+    // Determine target directory path: query param ?path= or default based on event_slug
+    let path_param = req.url().ok().and_then(|url| {
+        url.query_pairs()
+            .find(|(k, _)| k == "path")
+            .map(|(_, v)| v.to_string())
+    });
+
+    let folder_path = match path_param {
+        Some(ref p) if !p.trim().is_empty() => {
+            let sanitized = p.trim().trim_matches('/');
+            validate_upload_path(sanitized)?;
+            sanitized.to_string()
+        }
+        _ => {
+            if event_slug == "community-day-2026" {
+                "comday-26".to_string()
+            } else {
+                format!("{event_slug}/mockups")
+            }
+        }
+    };
+
+    let bytes = req
+        .bytes()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
+
+    let format = crate::http::avatars::detect_image_format(&bytes)?;
+
+    let timestamp = (js_sys::Date::now() / 1000.0) as u64;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let hash = hasher.finalize();
+    let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+    let hash_prefix = &hash_hex[..12];
+
+    let key = format!("{folder_path}/{hash_prefix}_{timestamp}.{}", format.ext);
+
+    let bucket = ctx.bucket("AVATAR_BUCKET")?;
+    bucket
+        .put(&key, bytes)
+        .http_metadata(worker::HttpMetadata {
+            content_type: Some(format.mime.to_string()),
+            ..Default::default()
+        })
+        .execute()
+        .await?;
+
+    let public_url = format!(
+        "{}/{}",
+        config.avatar_public_base_url.trim_end_matches('/'),
+        key
+    );
+
+    console_log!("sponsor mockup uploaded: event={event_slug} key={key} url={public_url}");
+
+    let body = SponsorMockupUploadResponse {
+        url: public_url,
+        key,
+    };
+    json_success_cors(&body, &config.allowed_origins, origin.as_deref())
+}
+
+pub fn validate_upload_path(path: &str) -> Result<(), AppError> {
+    if path.is_empty() || path.len() > 80 {
+        return Err(AppError::BadRequest(
+            "Upload path must be 1..=80 characters".to_string(),
+        ));
+    }
+    if !path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/')
+    {
+        return Err(AppError::BadRequest(
+            "Upload path may only contain alphanumeric characters, hyphens, underscores, and forward slashes".to_string(),
+        ));
+    }
+    if path.contains("//") || path.contains("..") {
+        return Err(AppError::BadRequest("Invalid path format".to_string()));
+    }
+    Ok(())
 }
 
 // --- validation helpers ---
@@ -2144,5 +2253,29 @@ mod tests {
             "platinum", "Platinum", 40_000_000, "platinum",
         )]);
         assert!(validate_tier_batch("UPPER", &input).is_err());
+    }
+
+    #[test]
+    fn test_validate_upload_path() {
+        assert!(validate_upload_path("comday-26").is_ok());
+        assert!(validate_upload_path("community-day-2026/mockups").is_ok());
+        assert!(validate_upload_path("sponsors_v2/assets").is_ok());
+
+        assert!(validate_upload_path("").is_err());
+        assert!(validate_upload_path("path//double_slash").is_err());
+        assert!(validate_upload_path("../escape_dir").is_err());
+        assert!(validate_upload_path("invalid*char").is_err());
+        assert!(validate_upload_path(&"a".repeat(81)).is_err());
+    }
+
+    #[test]
+    fn test_sponsor_mockup_upload_response_serialization() {
+        let resp = SponsorMockupUploadResponse {
+            url: "https://avatars.awscommunity.id/comday-26/abc_123.png".to_string(),
+            key: "comday-26/abc_123.png".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"url\":"));
+        assert!(json.contains("\"key\":"));
     }
 }

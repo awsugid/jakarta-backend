@@ -357,6 +357,21 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             },
         )
         // ---------------------------------------------------------------
+        // POST /api/admin/events/:eventSlug/sponsor-mockup — upload sponsor placement mockup image to Cloudflare R2 (admin-only)
+        // ---------------------------------------------------------------
+        .post_async(
+            "/api/admin/events/:eventSlug/sponsor-mockup",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_upload_sponsor_mockup(req, ctx).await
+            },
+        )
+        .post_async(
+            "/api/admin/events/:eventSlug/sponsor-packages/mockup",
+            |req, ctx| async move {
+                crate::http::sponsors::handle_admin_upload_sponsor_mockup(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
         // CORS preflight for all /api/* routes
         // ---------------------------------------------------------------
         .options("/api/*rest", |_req, ctx| {
