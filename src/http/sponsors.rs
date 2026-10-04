@@ -39,6 +39,10 @@ const MAX_THRESHOLD_IDR: i64 = 1_000_000_000;
 const MAX_TIER_LABEL_LEN: usize = 60;
 /// Accent values accepted for sponsor tiers; mirrors the table CHECK.
 const ACCENT_ALLOWLIST: &[&str] = &["platinum", "gold", "silver", "bronze", "default"];
+pub struct ImageFormat {
+    pub ext: &'static str,
+    pub mime: &'static str,
+}
 
 pub fn detect_mockup_format(bytes: &[u8]) -> Result<ImageFormat, AppError> {
     if bytes.is_empty() {
