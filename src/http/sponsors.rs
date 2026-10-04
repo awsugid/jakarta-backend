@@ -19,6 +19,8 @@ use crate::sponsors::types::{
     SponsorPackagesResponse, SponsorSettingsUpdate, SponsorTierBatchUpdate, SponsorTierCreate,
 };
 
+pub const MAX_MOCKUP_SIZE: usize = 5 * 1024 * 1024; // 5MB
+
 const MAX_PACKAGES_PER_UPDATE: usize = 50;
 const MAX_GROUPS_PER_UPDATE: usize = 20;
 const MIN_PRICE_IDR: i64 = 1;
@@ -37,6 +39,42 @@ const MAX_THRESHOLD_IDR: i64 = 1_000_000_000;
 const MAX_TIER_LABEL_LEN: usize = 60;
 /// Accent values accepted for sponsor tiers; mirrors the table CHECK.
 const ACCENT_ALLOWLIST: &[&str] = &["platinum", "gold", "silver", "bronze", "default"];
+
+pub fn detect_mockup_format(bytes: &[u8]) -> Result<ImageFormat, AppError> {
+    if bytes.is_empty() {
+        return Err(AppError::BadRequest("Image payload is empty.".to_string()));
+    }
+    if bytes.len() > MAX_MOCKUP_SIZE {
+        return Err(AppError::BadRequest(
+            "Mockup size exceeds maximum allowed limit of 5MB.".to_string(),
+        ));
+    }
+
+    if bytes.len() >= 3 && bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Ok(ImageFormat {
+            ext: "jpg",
+            mime: "image/jpeg",
+        });
+    }
+
+    if bytes.len() >= 8 && bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+        return Ok(ImageFormat {
+            ext: "png",
+            mime: "image/png",
+        });
+    }
+
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Ok(ImageFormat {
+            ext: "webp",
+            mime: "image/webp",
+        });
+    }
+
+    Err(AppError::BadRequest(
+        "Unsupported image format. Allowed formats: JPEG, PNG, WebP".to_string(),
+    ))
+}
 
 /// GET /api/events/:eventSlug/sponsor-packages — public listing, locked rows included.
 pub async fn handle_public_sponsor_packages(
@@ -1042,7 +1080,7 @@ pub async fn handle_admin_upload_sponsor_mockup(
         .await
         .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
 
-    let format = crate::http::avatars::detect_image_format(&bytes)?;
+    let format = detect_mockup_format(&bytes)?;
 
     let timestamp = (js_sys::Date::now() / 1000.0) as u64;
     let mut hasher = Sha256::new();
