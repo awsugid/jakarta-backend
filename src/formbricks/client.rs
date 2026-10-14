@@ -195,10 +195,30 @@ impl FormbricksClient {
         }
     }
 
-    /// Fetch a survey definition including questions.
+    /// Fetch a survey definition including questions (cached via Edge Cache with 15m TTL).
     ///
     /// Calls `GET /api/v1/management/surveys/{surveyId}`.
     pub async fn get_survey(&self, survey_id: &str) -> Result<FormbricksSurvey, String> {
+        let cache_key = format!(
+            "https://jakarta-backend.local/cache/formbricks-survey-{}?v=1",
+            survey_id
+        );
+        let cache = worker::Cache::default();
+
+        if let Ok(Some(mut cached_resp)) = cache.get(&cache_key, true).await {
+            if let Ok(body) = cached_resp.text().await {
+                #[derive(serde::Deserialize)]
+                struct Wrapper {
+                    data: FormbricksSurvey,
+                }
+                if let Ok(wrapper) = serde_json::from_str::<Wrapper>(&body) {
+                    return Ok(wrapper.data);
+                } else if let Ok(survey) = serde_json::from_str::<FormbricksSurvey>(&body) {
+                    return Ok(survey);
+                }
+            }
+        }
+
         let url = format!("{}/api/v1/management/surveys/{}", self.base_url, survey_id);
 
         let headers = Headers::new();
@@ -237,6 +257,17 @@ impl FormbricksClient {
             .text()
             .await
             .map_err(|e| format!("failed to read FormBricks response text: {e}"))?;
+
+        // Cache for 15 minutes (900 seconds)
+        if let Ok(mut cache_resp) = worker::Response::ok(&body) {
+            if cache_resp
+                .headers_mut()
+                .set("Cache-Control", "public, max-age=900")
+                .is_ok()
+            {
+                let _ = cache.put(&cache_key, cache_resp).await;
+            }
+        }
 
         // Try wrapped response first, then direct
         #[derive(serde::Deserialize)]

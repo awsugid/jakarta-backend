@@ -121,6 +121,39 @@ impl FormRepository {
         result.results::<ApplicationForm>()
     }
 
+    /// List all forms (including inactive) for admin console.
+    pub async fn list_forms_admin(&self) -> WorkerResult<Vec<ApplicationForm>> {
+        let sql = "SELECT * FROM application_forms ORDER BY kind, display_order, title";
+        let result = self.db.prepare(sql).all().await?;
+        result.results::<ApplicationForm>()
+    }
+
+    /// Update active status of a form by kind and slug.
+    pub async fn update_form_active(
+        &self,
+        kind: &str,
+        slug: &str,
+        is_active: bool,
+    ) -> WorkerResult<Option<ApplicationForm>> {
+        let sql = r#"
+            UPDATE application_forms
+            SET is_active = ?,
+                updated_at = datetime('now')
+            WHERE kind = ? AND slug = ?
+        "#;
+        self.db
+            .prepare(sql)
+            .bind(&[
+                JsValue::from_bool(is_active),
+                JsValue::from_str(kind),
+                JsValue::from_str(slug),
+            ])?
+            .run()
+            .await?;
+
+        self.get_form(kind, slug).await
+    }
+
     /// Get a form by its FormBricks survey ID.
     pub async fn get_form_by_survey_id(
         &self,
