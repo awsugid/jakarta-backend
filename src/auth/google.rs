@@ -112,10 +112,25 @@ async fn validate_google_id_token(token: &str, config: &AppConfig) -> Result<Aut
     let kid = header
         .kid
         .ok_or_else(|| AppError::Unauthorized("Google ID token is missing key id.".to_string()))?;
-    let jwks = fetch_google_jwks().await?;
-    let jwk = jwks
-        .find(&kid)
-        .ok_or_else(|| AppError::Unauthorized("Google signing key was not found.".to_string()))?;
+
+    let mut jwks = fetch_google_jwks(false).await?;
+    let mut jwk = jwks.find(&kid);
+
+    // If key not found, could be a recently rotated Google key. Bypass cache with a 30s throttle.
+    if jwk.is_none() {
+        let now = (js_sys::Date::now() / 1000.0) as u64;
+        let last = LAST_FORCE_REFRESH.load(std::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(last) >= 30 {
+            LAST_FORCE_REFRESH.store(now, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(fresh_jwks) = fetch_google_jwks(true).await {
+                jwks = fresh_jwks;
+                jwk = jwks.find(&kid);
+            }
+        }
+    }
+
+    let jwk =
+        jwk.ok_or_else(|| AppError::Unauthorized("Google signing key was not found.".to_string()))?;
 
     let mut validation = Validation::new(Algorithm::RS256);
     validation.set_audience(&[config.google_client_id.as_str()]);
@@ -143,7 +158,23 @@ async fn validate_google_id_token(token: &str, config: &AppConfig) -> Result<Aut
     })
 }
 
-async fn fetch_google_jwks() -> Result<JwkSet, AppError> {
+static LAST_FORCE_REFRESH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+async fn fetch_google_jwks(force_fresh: bool) -> Result<JwkSet, AppError> {
+    let cache_key = "https://jakarta-backend.local/cache/google-jwks-certs?v=1";
+    let cache = worker::Cache::default();
+
+    // Check Cloudflare Edge cache if not forced fresh
+    if !force_fresh {
+        if let Ok(Some(mut cached_resp)) = cache.get(cache_key, true).await {
+            if let Ok(text) = cached_resp.text().await {
+                if let Ok(jwks) = serde_json::from_str::<JwkSet>(&text) {
+                    return Ok(jwks);
+                }
+            }
+        }
+    }
+
     let headers = Headers::new();
     headers
         .set("Accept", "application/json")
@@ -170,7 +201,24 @@ async fn fetch_google_jwks() -> Result<JwkSet, AppError> {
         ));
     }
 
-    resp.json::<JwkSet>()
+    let body = resp
+        .text()
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to parse Google JWKS: {e}")))
+        .map_err(|e| AppError::Internal(format!("Failed to read Google JWKS text: {e}")))?;
+
+    let jwks: JwkSet = serde_json::from_str(&body)
+        .map_err(|e| AppError::Internal(format!("Failed to parse Google JWKS: {e}")))?;
+
+    // Store in Cloudflare Edge Cache with 6-hour TTL (21600 seconds)
+    if let Ok(mut cache_resp) = worker::Response::ok(&body) {
+        if cache_resp
+            .headers_mut()
+            .set("Cache-Control", "public, max-age=21600")
+            .is_ok()
+        {
+            let _ = cache.put(cache_key, cache_resp).await;
+        }
+    }
+
+    Ok(jwks)
 }
