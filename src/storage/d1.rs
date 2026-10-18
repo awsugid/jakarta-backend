@@ -653,6 +653,7 @@ impl ProfileRepository {
     /// Search profiles for admin speaker assignment.
     /// Returns profiles matching query (by email, name, display_name, or username).
     /// If query is None or empty, returns latest profiles ordered by updated_at.
+    #[allow(dead_code)]
     pub async fn search_profiles(
         db: &D1Database,
         query: Option<&str>,
@@ -688,6 +689,116 @@ impl ProfileRepository {
                 result.results::<Profile>()
             }
         }
+    }
+
+    /// Search users who have registered as a speaker (submitted CFP application form).
+    /// Joins `application_response_index` with `application_forms` (where `kind = 'speaker'`)
+    /// and LEFT JOINs `profiles` for user profile metadata.
+    pub async fn search_registered_speakers(
+        db: &D1Database,
+        query: Option<&str>,
+        limit: usize,
+    ) -> WorkerResult<Vec<RegisteredSpeakerCandidate>> {
+        let lim = if limit == 0 || limit > 50 { 20 } else { limit };
+        let q_clean = query.map(|s| s.trim()).filter(|s| !s.is_empty());
+
+        match q_clean {
+            Some(q) => {
+                let pattern = format!("%{}%", q);
+                let sql = "SELECT \
+                           ari.normalized_email, \
+                           p.name, \
+                           p.picture, \
+                           COALESCE(p.updated_at, MAX(ari.updated_at)) AS updated_at, \
+                           p.display_name, \
+                           p.title, \
+                           COALESCE(p.links_json, '[]') AS links_json, \
+                           COALESCE(p.is_public, 0) AS is_public, \
+                           p.profile_updated_at, \
+                           p.username, \
+                           MAX(ari.normalized_linkedin_url) AS linkedin_url \
+                           FROM application_response_index ari \
+                           JOIN application_forms af ON ari.form_id = af.id AND af.kind = 'speaker' \
+                           LEFT JOIN profiles p ON ari.normalized_email = p.normalized_email \
+                           WHERE (ari.status = 'active' OR ari.status IS NULL) \
+                           AND (ari.normalized_email LIKE ? OR p.name LIKE ? OR p.display_name LIKE ? OR p.username LIKE ?) \
+                           GROUP BY ari.normalized_email \
+                           ORDER BY updated_at DESC LIMIT ?";
+                let bind_values = vec![
+                    JsValue::from_str(&pattern),
+                    JsValue::from_str(&pattern),
+                    JsValue::from_str(&pattern),
+                    JsValue::from_str(&pattern),
+                    JsValue::from_f64(lim as f64),
+                ];
+                let result = db.prepare(sql).bind(&bind_values)?.all().await?;
+                result.results::<RegisteredSpeakerCandidate>()
+            }
+            None => {
+                let sql = "SELECT \
+                           ari.normalized_email, \
+                           p.name, \
+                           p.picture, \
+                           COALESCE(p.updated_at, MAX(ari.updated_at)) AS updated_at, \
+                           p.display_name, \
+                           p.title, \
+                           COALESCE(p.links_json, '[]') AS links_json, \
+                           COALESCE(p.is_public, 0) AS is_public, \
+                           p.profile_updated_at, \
+                           p.username, \
+                           MAX(ari.normalized_linkedin_url) AS linkedin_url \
+                           FROM application_response_index ari \
+                           JOIN application_forms af ON ari.form_id = af.id AND af.kind = 'speaker' \
+                           LEFT JOIN profiles p ON ari.normalized_email = p.normalized_email \
+                           WHERE (ari.status = 'active' OR ari.status IS NULL) \
+                           GROUP BY ari.normalized_email \
+                           ORDER BY updated_at DESC LIMIT ?";
+                let bind_values = vec![JsValue::from_f64(lim as f64)];
+                let result = db.prepare(sql).bind(&bind_values)?.all().await?;
+                result.results::<RegisteredSpeakerCandidate>()
+            }
+        }
+    }
+}
+
+/// Candidate returned from registered speaker CFP searches
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegisteredSpeakerCandidate {
+    pub normalized_email: String,
+    pub name: Option<String>,
+    pub picture: Option<String>,
+    pub updated_at: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default = "default_links_json")]
+    pub links_json: String,
+    #[serde(default, deserialize_with = "deserialize_d1_bool_opt")]
+    pub is_public: bool,
+    #[serde(default)]
+    pub profile_updated_at: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub linkedin_url: Option<String>,
+}
+
+impl RegisteredSpeakerCandidate {
+    pub fn links(&self) -> Vec<crate::validation::profile::ProfileLink> {
+        let mut links = crate::validation::profile::parse_links_json(&self.links_json);
+        if links.is_empty() {
+            if let Some(ref lk) = self.linkedin_url {
+                if !lk.trim().is_empty() {
+                    links.push(crate::validation::profile::ProfileLink {
+                        kind: "linkedin".to_string(),
+                        url: lk.clone(),
+                        label: None,
+                    });
+                }
+            }
+        }
+        links
     }
 }
 
