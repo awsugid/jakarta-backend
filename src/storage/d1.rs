@@ -653,6 +653,7 @@ impl ProfileRepository {
     /// Search profiles for admin speaker assignment.
     /// Returns profiles matching query (by email, name, display_name, or username).
     /// If query is None or empty, returns latest profiles ordered by updated_at.
+    #[allow(dead_code)]
     pub async fn search_profiles(
         db: &D1Database,
         query: Option<&str>,
