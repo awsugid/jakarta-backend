@@ -18,6 +18,8 @@ pub struct EventSpeaker {
     pub talk_title: String,
     #[serde(alias = "talk_format")]
     pub talk_format: Option<String>,
+    #[serde(alias = "topic_image_url")]
+    pub topic_image_url: Option<String>,
     pub bio: Option<String>,
     #[serde(alias = "social_url")]
     pub social_url: Option<String>,
@@ -41,6 +43,7 @@ pub struct EventSpeakerCreate {
     pub photo_url: String,
     pub talk_title: String,
     pub talk_format: Option<String>,
+    pub topic_image_url: Option<String>,
     pub bio: Option<String>,
     pub social_url: Option<String>,
     pub is_active: Option<bool>,
@@ -56,6 +59,7 @@ pub struct EventSpeakerUpdate {
     pub photo_url: String,
     pub talk_title: String,
     pub talk_format: Option<String>,
+    pub topic_image_url: Option<String>,
     pub bio: Option<String>,
     pub social_url: Option<String>,
     pub is_active: bool,

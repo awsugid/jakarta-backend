@@ -69,7 +69,7 @@ impl SpeakerRepository {
     pub async fn list_public_speakers(&self, event_slug: &str) -> WorkerResult<Vec<EventSpeaker>> {
         let sql = r#"
             SELECT event_slug, id, name, role, company, photo_url, talk_title,
-                   talk_format, bio, social_url, is_active, display_order, created_at, updated_at
+                   talk_format, topic_image_url, bio, social_url, is_active, display_order, created_at, updated_at
             FROM event_speakers
             WHERE event_slug = ? AND is_active = 1
             ORDER BY display_order ASC, id ASC
@@ -87,7 +87,7 @@ impl SpeakerRepository {
     pub async fn list_speakers(&self, event_slug: &str) -> WorkerResult<Vec<EventSpeaker>> {
         let sql = r#"
             SELECT event_slug, id, name, role, company, photo_url, talk_title,
-                   talk_format, bio, social_url, is_active, display_order, created_at, updated_at
+                   talk_format, topic_image_url, bio, social_url, is_active, display_order, created_at, updated_at
             FROM event_speakers
             WHERE event_slug = ?
             ORDER BY display_order ASC, id ASC
@@ -109,7 +109,7 @@ impl SpeakerRepository {
     ) -> WorkerResult<Option<EventSpeaker>> {
         let sql = r#"
             SELECT event_slug, id, name, role, company, photo_url, talk_title,
-                   talk_format, bio, social_url, is_active, display_order, created_at, updated_at
+                   talk_format, topic_image_url, bio, social_url, is_active, display_order, created_at, updated_at
             FROM event_speakers
             WHERE event_slug = ? AND id = ?
         "#;
@@ -153,6 +153,10 @@ impl SpeakerRepository {
             Some(f) if !f.trim().is_empty() => JsValue::from_str(f.trim()),
             _ => JsValue::from_str("Technical Session"),
         };
+        let topic_image_url = match input.topic_image_url.as_deref() {
+            Some(t) if !t.trim().is_empty() => JsValue::from_str(t.trim()),
+            _ => JsValue::NULL,
+        };
         let bio = match input.bio.as_deref() {
             Some(b) if !b.trim().is_empty() => JsValue::from_str(b.trim()),
             _ => JsValue::NULL,
@@ -165,8 +169,8 @@ impl SpeakerRepository {
         let sql = r#"
             INSERT INTO event_speakers
               (event_slug, id, name, role, company, photo_url, talk_title, talk_format,
-               bio, social_url, is_active, display_order)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               topic_image_url, bio, social_url, is_active, display_order)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#;
 
         self.db
@@ -180,6 +184,7 @@ impl SpeakerRepository {
                 JsValue::from_str(input.photo_url.trim()),
                 JsValue::from_str(input.talk_title.trim()),
                 talk_format,
+                topic_image_url,
                 bio,
                 social_url,
                 JsValue::from_f64(if is_active { 1.0 } else { 0.0 }),
@@ -224,6 +229,10 @@ impl SpeakerRepository {
             Some(f) if !f.trim().is_empty() => JsValue::from_str(f.trim()),
             _ => JsValue::from_str("Technical Session"),
         };
+        let topic_image_url = match input.topic_image_url.as_deref() {
+            Some(t) if !t.trim().is_empty() => JsValue::from_str(t.trim()),
+            _ => JsValue::NULL,
+        };
         let bio = match input.bio.as_deref() {
             Some(b) if !b.trim().is_empty() => JsValue::from_str(b.trim()),
             _ => JsValue::NULL,
@@ -241,6 +250,7 @@ impl SpeakerRepository {
                 photo_url = ?,
                 talk_title = ?,
                 talk_format = ?,
+                topic_image_url = ?,
                 bio = ?,
                 social_url = ?,
                 is_active = ?,
@@ -257,6 +267,7 @@ impl SpeakerRepository {
                 JsValue::from_str(input.photo_url.trim()),
                 JsValue::from_str(input.talk_title.trim()),
                 talk_format,
+                topic_image_url,
                 bio,
                 social_url,
                 JsValue::from_f64(if input.is_active { 1.0 } else { 0.0 }),
