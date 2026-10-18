@@ -936,11 +936,11 @@ pub async fn handle_admin_search_users(req: Request, ctx: RouteContext<()>) -> R
             .map(|(_, v)| v.to_string())
     });
 
-    let profiles = ProfileRepository::search_profiles(&db, q_param.as_deref(), 25)
+    let candidates = ProfileRepository::search_registered_speakers(&db, q_param.as_deref(), 25)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
-    let users = profiles
+    let users = candidates
         .into_iter()
         .map(|p| {
             let links = p.links();
@@ -948,6 +948,7 @@ pub async fn handle_admin_search_users(req: Request, ctx: RouteContext<()>) -> R
                 .iter()
                 .find(|l| l.kind == "linkedin")
                 .map(|l| l.url.clone())
+                .or_else(|| p.linkedin_url.clone())
                 .or_else(|| links.first().map(|l| l.url.clone()));
 
             let name = p
