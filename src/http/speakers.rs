@@ -325,3 +325,77 @@ pub async fn handle_admin_reorder_speakers(
     };
     json_success_cors(&body, &config.allowed_origins, origin.as_deref())
 }
+
+/// POST /api/admin/events/:eventSlug/speakers/upload — Upload a speaker photo or topic banner (admin-only).
+pub async fn handle_admin_upload_speaker_asset(
+    mut req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
+    use sha2::{Digest, Sha256};
+
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+    validate_event_slug(event_slug)?;
+
+    let asset_type = req
+        .url()
+        .ok()
+        .and_then(|url| {
+            url.query_pairs()
+                .find(|(k, _)| k == "type")
+                .map(|(_, v)| v.to_string())
+        })
+        .unwrap_or_else(|| "photo".to_string());
+
+    let folder = if asset_type == "topic" {
+        format!("{event_slug}/topics")
+    } else {
+        format!("{event_slug}/speakers")
+    };
+
+    let bytes = req
+        .bytes()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Failed to read request body: {e}")))?;
+
+    let format = crate::http::sponsors::detect_mockup_format(&bytes)?;
+
+    let timestamp = (js_sys::Date::now() / 1000.0) as u64;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let hash = hasher.finalize();
+    let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+    let hash_prefix = &hash_hex[..12];
+
+    let key = format!("{folder}/{hash_prefix}_{timestamp}.{}", format.ext);
+
+    let bucket = ctx.bucket("AVATAR_BUCKET")?;
+    bucket
+        .put(&key, bytes)
+        .http_metadata(worker::HttpMetadata {
+            content_type: Some(format.mime.to_string()),
+            ..Default::default()
+        })
+        .execute()
+        .await?;
+
+    let public_url = format!(
+        "{}/{}",
+        config.avatar_public_base_url.trim_end_matches('/'),
+        key
+    );
+
+    console_log!("speaker asset uploaded: event={event_slug} key={key} url={public_url}");
+
+    let body = serde_json::json!({
+        "url": public_url,
+        "key": key
+    });
+    json_success_cors(&body, &config.allowed_origins, origin.as_deref())
+}
