@@ -7,6 +7,7 @@ mod formbricks;
 mod http;
 mod links;
 mod pretix;
+mod speakers;
 mod sponsors;
 mod statistics;
 mod storage;

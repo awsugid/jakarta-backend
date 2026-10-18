@@ -357,6 +357,48 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             },
         )
         // ---------------------------------------------------------------
+        // GET /api/events/:eventSlug/speakers — public active speakers
+        // ---------------------------------------------------------------
+        .get_async("/api/events/:eventSlug/speakers", |req, ctx| async move {
+            crate::http::speakers::handle_public_speakers(req, ctx).await
+        })
+        // ---------------------------------------------------------------
+        // Admin — Event Speakers Management (admin-only)
+        // ---------------------------------------------------------------
+        .get_async("/api/admin/speakers", |req, ctx| async move {
+            crate::http::speakers::handle_admin_list_all_speakers(req, ctx).await
+        })
+        .get_async(
+            "/api/admin/events/:eventSlug/speakers",
+            |req, ctx| async move {
+                crate::http::speakers::handle_admin_list_speakers(req, ctx).await
+            },
+        )
+        .post_async(
+            "/api/admin/events/:eventSlug/speakers",
+            |req, ctx| async move {
+                crate::http::speakers::handle_admin_create_speaker(req, ctx).await
+            },
+        )
+        .put_async(
+            "/api/admin/events/:eventSlug/speakers/order",
+            |req, ctx| async move {
+                crate::http::speakers::handle_admin_reorder_speakers(req, ctx).await
+            },
+        )
+        .put_async(
+            "/api/admin/events/:eventSlug/speakers/:speakerId",
+            |req, ctx| async move {
+                crate::http::speakers::handle_admin_update_speaker(req, ctx).await
+            },
+        )
+        .delete_async(
+            "/api/admin/events/:eventSlug/speakers/:speakerId",
+            |req, ctx| async move {
+                crate::http::speakers::handle_admin_delete_speaker(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
         // POST /api/admin/events/:eventSlug/sponsor-mockup — upload sponsor placement mockup image to Cloudflare R2 (admin-only)
         // ---------------------------------------------------------------
         .post_async(

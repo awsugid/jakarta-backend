@@ -299,39 +299,72 @@ impl SponsorPackageRepository {
         Self { db }
     }
 
-    /// Get configured USD exchange rate (IDR per USD) for an event, defaulting to 17000.
-    pub async fn get_usd_exchange_rate(&self, event_slug: &str) -> WorkerResult<i64> {
+    /// Get configured USD exchange rate and configurator enabled status for an event.
+    pub async fn get_sponsor_settings(&self, event_slug: &str) -> WorkerResult<(i64, bool)> {
         let stmt = self.db.prepare(
-            "SELECT usd_exchange_rate FROM sponsor_settings WHERE event_slug = ?1 LIMIT 1",
+            "SELECT usd_exchange_rate, is_configurator_enabled FROM sponsor_settings WHERE event_slug = ?1 LIMIT 1",
         );
         let bound = stmt.bind(&[JsValue::from_str(event_slug)])?;
         let result = bound.first::<serde_json::Value>(None).await?;
         if let Some(row) = result {
-            if let Some(rate) = row.get("usd_exchange_rate").and_then(|v| v.as_i64()) {
-                return Ok(rate);
-            }
+            let rate = row
+                .get("usd_exchange_rate")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(17000);
+            let enabled = row
+                .get("is_configurator_enabled")
+                .and_then(|v| v.as_i64())
+                .map(|v| v == 1)
+                .unwrap_or(true);
+            return Ok((rate, enabled));
         }
-        Ok(17000)
+        Ok((17000, true))
+    }
+
+    /// Get configured USD exchange rate (IDR per USD) for an event, defaulting to 17000.
+    #[allow(dead_code)]
+    pub async fn get_usd_exchange_rate(&self, event_slug: &str) -> WorkerResult<i64> {
+        let (rate, _) = self.get_sponsor_settings(event_slug).await?;
+        Ok(rate)
+    }
+
+    /// Upsert configured sponsor settings (USD exchange rate and/or configurator status).
+    pub async fn update_sponsor_settings(
+        &self,
+        event_slug: &str,
+        usd_exchange_rate: Option<i64>,
+        is_configurator_enabled: Option<bool>,
+    ) -> WorkerResult<(i64, bool)> {
+        let (cur_rate, cur_enabled) = self.get_sponsor_settings(event_slug).await?;
+        let new_rate = usd_exchange_rate.unwrap_or(cur_rate);
+        let new_enabled = is_configurator_enabled.unwrap_or(cur_enabled);
+
+        let stmt = self.db.prepare(
+            "INSERT INTO sponsor_settings (event_slug, usd_exchange_rate, is_configurator_enabled, updated_at)
+             VALUES (?1, ?2, ?3, datetime('now'))
+             ON CONFLICT(event_slug) DO UPDATE SET
+               usd_exchange_rate = excluded.usd_exchange_rate,
+               is_configurator_enabled = excluded.is_configurator_enabled,
+               updated_at = datetime('now')",
+        );
+        let bound = stmt.bind(&[
+            JsValue::from_str(event_slug),
+            JsValue::from_f64(new_rate as f64),
+            JsValue::from_f64(if new_enabled { 1.0 } else { 0.0 }),
+        ])?;
+        bound.run().await?;
+        Ok((new_rate, new_enabled))
     }
 
     /// Upsert configured USD exchange rate (IDR per USD) for an event.
+    #[allow(dead_code)]
     pub async fn update_usd_exchange_rate(
         &self,
         event_slug: &str,
         usd_exchange_rate: i64,
     ) -> WorkerResult<()> {
-        let stmt = self.db.prepare(
-            "INSERT INTO sponsor_settings (event_slug, usd_exchange_rate, updated_at)
-             VALUES (?1, ?2, datetime('now'))
-             ON CONFLICT(event_slug) DO UPDATE SET
-               usd_exchange_rate = excluded.usd_exchange_rate,
-               updated_at = datetime('now')",
-        );
-        let bound = stmt.bind(&[
-            JsValue::from_str(event_slug),
-            JsValue::from_f64(usd_exchange_rate as f64),
-        ])?;
-        bound.run().await?;
+        self.update_sponsor_settings(event_slug, Some(usd_exchange_rate), None)
+            .await?;
         Ok(())
     }
 
