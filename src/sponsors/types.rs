@@ -210,7 +210,10 @@ pub struct SponsorPackageBatchUpdate {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SponsorSettingsUpdate {
-    pub usd_exchange_rate: i64,
+    #[serde(default, alias = "usd_exchange_rate")]
+    pub usd_exchange_rate: Option<i64>,
+    #[serde(default, alias = "is_configurator_enabled")]
+    pub is_configurator_enabled: Option<bool>,
 }
 
 /// Shared response shape of the public GET and admin PUT.
@@ -221,6 +224,8 @@ pub struct SponsorPackagesResponse<'a> {
     pub currency: &'a str,
     #[serde(alias = "usd_exchange_rate")]
     pub usd_exchange_rate: i64,
+    #[serde(alias = "is_configurator_enabled")]
+    pub is_configurator_enabled: bool,
     /// Groups ordered by display_order; empty when the event has none seeded.
     pub groups: &'a [SponsorPackageGroup],
     pub packages: &'a [SponsorPackage],

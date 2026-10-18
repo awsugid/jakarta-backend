@@ -80,6 +80,29 @@ pub fn detect_mockup_format(bytes: &[u8]) -> Result<ImageFormat, AppError> {
     ))
 }
 
+async fn build_packages_response<'a>(
+    repo: &'a SponsorPackageRepository,
+    event_slug: &'a str,
+    groups: &'a [crate::sponsors::types::SponsorPackageGroup],
+    packages: &'a [crate::sponsors::types::SponsorPackage],
+    tiers: &'a [crate::sponsors::types::SponsorTier],
+) -> SponsorPackagesResponse<'a> {
+    let (usd_exchange_rate, is_configurator_enabled) = repo
+        .get_sponsor_settings(event_slug)
+        .await
+        .unwrap_or((17000, true));
+
+    SponsorPackagesResponse {
+        event_slug,
+        currency: "IDR",
+        usd_exchange_rate,
+        is_configurator_enabled,
+        groups,
+        packages,
+        tiers,
+    }
+}
+
 /// GET /api/events/:eventSlug/sponsor-packages — public listing, locked rows included.
 pub async fn handle_public_sponsor_packages(
     req: Request,
@@ -116,19 +139,8 @@ pub async fn handle_public_sponsor_packages(
         .list_tiers(event_slug)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let usd_exchange_rate = repo
-        .get_usd_exchange_rate(event_slug)
-        .await
-        .unwrap_or(17000);
 
-    let body = SponsorPackagesResponse {
-        event_slug,
-        currency: "IDR",
-        usd_exchange_rate,
-        groups: &groups,
-        packages: &packages,
-        tiers: &tiers,
-    };
+    let body = build_packages_response(&repo, event_slug, &groups, &packages, &tiers).await;
     let resp = json_success(&body)?;
     with_cors(resp, &config.allowed_origins)
 }
@@ -199,19 +211,7 @@ pub async fn handle_admin_update_sponsor_packages(
         .list_tiers(event_slug)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let usd_exchange_rate = repo
-        .get_usd_exchange_rate(event_slug)
-        .await
-        .unwrap_or(17000);
-
-    let body = SponsorPackagesResponse {
-        event_slug,
-        currency: "IDR",
-        usd_exchange_rate,
-        groups: &groups,
-        packages: &packages,
-        tiers: &tiers,
-    };
+    let body = build_packages_response(&repo, event_slug, &groups, &packages, &tiers).await;
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
 }
@@ -259,19 +259,7 @@ pub async fn handle_admin_create_sponsor_group(
         .list_tiers(event_slug)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let usd_exchange_rate = repo
-        .get_usd_exchange_rate(event_slug)
-        .await
-        .unwrap_or(17000);
-
-    let body = SponsorPackagesResponse {
-        event_slug,
-        currency: "IDR",
-        usd_exchange_rate,
-        groups: &groups,
-        packages: &packages,
-        tiers: &tiers,
-    };
+    let body = build_packages_response(&repo, event_slug, &groups, &packages, &tiers).await;
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
 }
@@ -328,19 +316,7 @@ pub async fn handle_admin_create_sponsor_package(
         .list_tiers(event_slug)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let usd_exchange_rate = repo
-        .get_usd_exchange_rate(event_slug)
-        .await
-        .unwrap_or(17000);
-
-    let body = SponsorPackagesResponse {
-        event_slug,
-        currency: "IDR",
-        usd_exchange_rate,
-        groups: &groups,
-        packages: &packages,
-        tiers: &tiers,
-    };
+    let body = build_packages_response(&repo, event_slug, &groups, &packages, &tiers).await;
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
 }
@@ -387,19 +363,7 @@ pub async fn handle_admin_delete_sponsor_package(
         .list_tiers(event_slug)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let usd_exchange_rate = repo
-        .get_usd_exchange_rate(event_slug)
-        .await
-        .unwrap_or(17000);
-
-    let body = SponsorPackagesResponse {
-        event_slug,
-        currency: "IDR",
-        usd_exchange_rate,
-        groups: &groups,
-        packages: &packages,
-        tiers: &tiers,
-    };
+    let body = build_packages_response(&repo, event_slug, &groups, &packages, &tiers).await;
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
 }
@@ -451,19 +415,7 @@ pub async fn handle_admin_delete_sponsor_group(
         .list_tiers(event_slug)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let usd_exchange_rate = repo
-        .get_usd_exchange_rate(event_slug)
-        .await
-        .unwrap_or(17000);
-
-    let body = SponsorPackagesResponse {
-        event_slug,
-        currency: "IDR",
-        usd_exchange_rate,
-        groups: &groups,
-        packages: &packages,
-        tiers: &tiers,
-    };
+    let body = build_packages_response(&repo, event_slug, &groups, &packages, &tiers).await;
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
 }
@@ -535,19 +487,7 @@ pub async fn handle_admin_create_sponsor_tier(
         input.threshold_idr
     );
 
-    let usd_exchange_rate = repo
-        .get_usd_exchange_rate(event_slug)
-        .await
-        .unwrap_or(17000);
-
-    let body = SponsorPackagesResponse {
-        event_slug,
-        currency: "IDR",
-        usd_exchange_rate,
-        groups: &groups,
-        packages: &packages,
-        tiers: &tiers,
-    };
+    let body = build_packages_response(&repo, event_slug, &groups, &packages, &tiers).await;
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
 }
@@ -605,19 +545,7 @@ pub async fn handle_admin_update_sponsor_tiers(
         input.tiers.len()
     );
 
-    let usd_exchange_rate = repo
-        .get_usd_exchange_rate(event_slug)
-        .await
-        .unwrap_or(17000);
-
-    let body = SponsorPackagesResponse {
-        event_slug,
-        currency: "IDR",
-        usd_exchange_rate,
-        groups: &groups,
-        packages: &packages,
-        tiers: &tiers,
-    };
+    let body = build_packages_response(&repo, event_slug, &groups, &packages, &tiers).await;
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
 }
@@ -669,19 +597,7 @@ pub async fn handle_admin_delete_sponsor_tier(
     // Safe log: ids only.
     console_log!("sponsor tier deleted: event={event_slug} tier_id={tier_id}");
 
-    let usd_exchange_rate = repo
-        .get_usd_exchange_rate(event_slug)
-        .await
-        .unwrap_or(17000);
-
-    let body = SponsorPackagesResponse {
-        event_slug,
-        currency: "IDR",
-        usd_exchange_rate,
-        groups: &groups,
-        packages: &packages,
-        tiers: &tiers,
-    };
+    let body = build_packages_response(&repo, event_slug, &groups, &packages, &tiers).await;
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
 }
@@ -706,11 +622,13 @@ pub async fn handle_admin_update_sponsor_settings(
         .await
         .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
 
-    if input.usd_exchange_rate < 1_000 || input.usd_exchange_rate > 1_000_000 {
-        return Err(AppError::BadRequest(
-            "USD exchange rate must be between IDR 1,000 and IDR 1,000,000".to_string(),
-        )
-        .into());
+    if let Some(rate) = input.usd_exchange_rate {
+        if !(1_000..=1_000_000).contains(&rate) {
+            return Err(AppError::BadRequest(
+                "USD exchange rate must be between IDR 1,000 and IDR 1,000,000".to_string(),
+            )
+            .into());
+        }
     }
 
     let db = ctx
@@ -718,9 +636,13 @@ pub async fn handle_admin_update_sponsor_settings(
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let repo = SponsorPackageRepository::new(db);
 
-    repo.update_usd_exchange_rate(event_slug, input.usd_exchange_rate)
-        .await
-        .map_err(|e| AppError::Internal(e.to_string()))?;
+    repo.update_sponsor_settings(
+        event_slug,
+        input.usd_exchange_rate,
+        input.is_configurator_enabled,
+    )
+    .await
+    .map_err(|e| AppError::Internal(e.to_string()))?;
 
     let groups = repo
         .list_groups(event_slug)
@@ -734,19 +656,8 @@ pub async fn handle_admin_update_sponsor_settings(
         .list_tiers(event_slug)
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
-    let usd_exchange_rate = repo
-        .get_usd_exchange_rate(event_slug)
-        .await
-        .unwrap_or(17000);
 
-    let body = SponsorPackagesResponse {
-        event_slug,
-        currency: "IDR",
-        usd_exchange_rate,
-        groups: &groups,
-        packages: &packages,
-        tiers: &tiers,
-    };
+    let body = build_packages_response(&repo, event_slug, &groups, &packages, &tiers).await;
     let resp = json_success_cors(&body, &config.allowed_origins, origin.as_deref())?;
     Ok(resp)
 }
