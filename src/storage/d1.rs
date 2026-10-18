@@ -649,6 +649,46 @@ impl ProfileRepository {
         let result = db.prepare(&sql).bind(&bind_values)?.all().await?;
         result.results::<Profile>()
     }
+
+    /// Search profiles for admin speaker assignment.
+    /// Returns profiles matching query (by email, name, display_name, or username).
+    /// If query is None or empty, returns latest profiles ordered by updated_at.
+    pub async fn search_profiles(
+        db: &D1Database,
+        query: Option<&str>,
+        limit: usize,
+    ) -> WorkerResult<Vec<Profile>> {
+        let lim = if limit == 0 || limit > 50 { 20 } else { limit };
+        let q_clean = query.map(|s| s.trim()).filter(|s| !s.is_empty());
+
+        match q_clean {
+            Some(q) => {
+                let pattern = format!("%{}%", q);
+                let sql = "SELECT normalized_email, name, picture, updated_at, display_name, title, \
+                           links_json, is_public, profile_updated_at, username FROM profiles \
+                           WHERE normalized_email LIKE ? OR name LIKE ? OR display_name LIKE ? OR username LIKE ? \
+                           ORDER BY updated_at DESC LIMIT ?";
+                let bind_values = vec![
+                    JsValue::from_str(&pattern),
+                    JsValue::from_str(&pattern),
+                    JsValue::from_str(&pattern),
+                    JsValue::from_str(&pattern),
+                    JsValue::from_f64(lim as f64),
+                ];
+                let result = db.prepare(sql).bind(&bind_values)?.all().await?;
+                result.results::<Profile>()
+            }
+            None => {
+                let sql =
+                    "SELECT normalized_email, name, picture, updated_at, display_name, title, \
+                           links_json, is_public, profile_updated_at, username FROM profiles \
+                           ORDER BY updated_at DESC LIMIT ?";
+                let bind_values = vec![JsValue::from_f64(lim as f64)];
+                let result = db.prepare(sql).bind(&bind_values)?.all().await?;
+                result.results::<Profile>()
+            }
+        }
+    }
 }
 
 /// Survey-scoped custom tag assignments on Formbricks responses

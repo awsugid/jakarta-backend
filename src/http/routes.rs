@@ -131,6 +131,9 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
         .get_async("/api/admin/me", |req, ctx| async move {
             crate::http::admin::handle_admin_me(req, ctx).await
         })
+        .get_async("/api/admin/users/search", |req, ctx| async move {
+            crate::http::admin::handle_admin_search_users(req, ctx).await
+        })
         .get_async("/api/admin/forms", |req, ctx| async move {
             crate::http::admin::handle_admin_forms(req, ctx).await
         })
@@ -396,6 +399,12 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             "/api/admin/events/:eventSlug/speakers/:speakerId",
             |req, ctx| async move {
                 crate::http::speakers::handle_admin_delete_speaker(req, ctx).await
+            },
+        )
+        .post_async(
+            "/api/admin/events/:eventSlug/speakers/upload",
+            |req, ctx| async move {
+                crate::http::speakers::handle_admin_upload_speaker_asset(req, ctx).await
             },
         )
         // ---------------------------------------------------------------

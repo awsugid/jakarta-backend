@@ -9,7 +9,7 @@ use crate::formbricks::responses::extract_answers_list;
 use crate::formbricks::types::{FormbricksResponse, FormbricksSurvey};
 use crate::http::errors::AppError;
 use crate::http::response::json_success_cors;
-use crate::storage::d1::{FormRepository, ResponseTagRepository};
+use crate::storage::d1::{FormRepository, ProfileRepository, ResponseTagRepository};
 use crate::validation::tags::normalize_tags;
 
 /// Safety cap for the live Formbricks walks backing admin response counts
@@ -826,6 +826,84 @@ fn extract_respondent(
     }
 
     (email, name)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUserSearchResult {
+    pub email: String,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub title: Option<String>,
+    pub picture: Option<String>,
+    pub username: Option<String>,
+    pub social_url: Option<String>,
+    pub links: Vec<crate::validation::profile::ProfileLink>,
+    pub is_public: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUserSearchResponse {
+    pub users: Vec<AdminUserSearchResult>,
+}
+
+/// GET /api/admin/users/search?q=... — search registered community users for speaker auto-fill (admin-only).
+pub async fn handle_admin_search_users(req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let q_param = req.url().ok().and_then(|url| {
+        url.query_pairs()
+            .find(|(k, _)| k == "q")
+            .map(|(_, v)| v.to_string())
+    });
+
+    let profiles = ProfileRepository::search_profiles(&db, q_param.as_deref(), 25)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let users = profiles
+        .into_iter()
+        .map(|p| {
+            let links = p.links();
+            let social_url = links
+                .iter()
+                .find(|l| l.kind == "linkedin")
+                .map(|l| l.url.clone())
+                .or_else(|| links.first().map(|l| l.url.clone()));
+
+            let name = p
+                .display_name
+                .as_ref()
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| p.name.as_ref().filter(|s| !s.trim().is_empty()))
+                .or_else(|| p.username.as_ref().filter(|s| !s.trim().is_empty()))
+                .cloned()
+                .unwrap_or_else(|| p.normalized_email.clone());
+
+            AdminUserSearchResult {
+                email: p.normalized_email,
+                name,
+                display_name: p.display_name,
+                title: p.title,
+                picture: p.picture,
+                username: p.username,
+                social_url,
+                links,
+                is_public: p.is_public,
+            }
+        })
+        .collect();
+
+    let body = AdminUserSearchResponse { users };
+    json_success_cors(&body, &config.allowed_origins, origin.as_deref())
 }
 
 #[cfg(test)]
