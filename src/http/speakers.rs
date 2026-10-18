@@ -82,6 +82,30 @@ pub async fn handle_admin_list_speakers(req: Request, ctx: RouteContext<()>) -> 
     json_success_cors(&body, &config.allowed_origins, origin.as_deref())
 }
 
+/// GET /api/admin/speakers — admin listing of all speakers across all events.
+pub async fn handle_admin_list_all_speakers(req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = SpeakerRepository::new(db);
+
+    let speakers = repo
+        .list_all_speakers()
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let body = serde_json::json!({
+        "speakers": speakers,
+    });
+    json_success_cors(&body, &config.allowed_origins, origin.as_deref())
+}
+
+
 /// POST /api/admin/events/:eventSlug/speakers — create a new speaker.
 pub async fn handle_admin_create_speaker(
     mut req: Request,

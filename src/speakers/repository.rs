@@ -101,6 +101,19 @@ impl SpeakerRepository {
         result.results::<EventSpeaker>()
     }
 
+    /// List all speakers across all events for admin overview.
+    pub async fn list_all_speakers(&self) -> WorkerResult<Vec<EventSpeaker>> {
+        let sql = r#"
+            SELECT event_slug, id, name, role, company, photo_url, talk_title,
+                   talk_format, topic_image_url, bio, social_url, is_active, display_order, created_at, updated_at
+            FROM event_speakers
+            ORDER BY event_slug ASC, display_order ASC, id ASC
+        "#;
+        let result = self.db.prepare(sql).all().await?;
+        result.results::<EventSpeaker>()
+    }
+
+
     /// Get a single speaker by ID.
     pub async fn get_speaker(
         &self,

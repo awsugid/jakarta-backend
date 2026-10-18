@@ -365,6 +365,9 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
         // ---------------------------------------------------------------
         // Admin — Event Speakers Management (admin-only)
         // ---------------------------------------------------------------
+        .get_async("/api/admin/speakers", |req, ctx| async move {
+            crate::http::speakers::handle_admin_list_all_speakers(req, ctx).await
+        })
         .get_async(
             "/api/admin/events/:eventSlug/speakers",
             |req, ctx| async move {
