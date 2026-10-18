@@ -83,7 +83,10 @@ pub async fn handle_admin_list_speakers(req: Request, ctx: RouteContext<()>) -> 
 }
 
 /// GET /api/admin/speakers — admin listing of all speakers across all events.
-pub async fn handle_admin_list_all_speakers(req: Request, ctx: RouteContext<()>) -> Result<Response> {
+pub async fn handle_admin_list_all_speakers(
+    req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
     let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
     let db_opt = ctx.d1("DB").ok();
     require_admin(&req, &config, db_opt.as_ref()).await?;
@@ -104,7 +107,6 @@ pub async fn handle_admin_list_all_speakers(req: Request, ctx: RouteContext<()>)
     });
     json_success_cors(&body, &config.allowed_origins, origin.as_deref())
 }
-
 
 /// POST /api/admin/events/:eventSlug/speakers — create a new speaker.
 pub async fn handle_admin_create_speaker(

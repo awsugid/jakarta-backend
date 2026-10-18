@@ -113,7 +113,6 @@ impl SpeakerRepository {
         result.results::<EventSpeaker>()
     }
 
-
     /// Get a single speaker by ID.
     pub async fn get_speaker(
         &self,
