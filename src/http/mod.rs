@@ -6,6 +6,8 @@ pub mod profiles;
 pub mod reingest;
 pub mod response;
 pub mod routes;
+pub mod schedule;
+pub mod sessionize;
 pub mod speakers;
 pub mod sponsors;
 pub mod user_orders;
