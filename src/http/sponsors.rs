@@ -1348,6 +1348,7 @@ mod tests {
             price_idr,
             price_usd: None,
             image_url: None,
+            deadline_date: None,
         }
     }
 
@@ -1517,6 +1518,7 @@ mod tests {
             is_unlocked,
             group_id: None,
             image_url: None,
+            deadline_date: None,
         }
     }
 

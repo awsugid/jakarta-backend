@@ -388,7 +388,7 @@ impl SponsorPackageRepository {
     /// List all packages for an event (locked included) ordered by display_order, id.
     pub async fn list_packages(&self, event_slug: &str) -> WorkerResult<Vec<SponsorPackage>> {
         let sql = r#"
-            SELECT id, event_slug, name, advantage, category, group_id, price_idr, price_usd, minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked, image_url, display_order, updated_at
+            SELECT id, event_slug, name, advantage, category, group_id, price_idr, price_usd, minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked, image_url, deadline_date, display_order, updated_at
             FROM sponsor_packages
             WHERE event_slug = ?
             ORDER BY display_order, id
@@ -490,14 +490,19 @@ impl SponsorPackageRepository {
             _ => JsValue::NULL,
         };
 
+        let deadline_val = match input.deadline_date.as_deref() {
+            Some(d) if !d.trim().is_empty() => JsValue::from_str(d.trim()),
+            _ => JsValue::NULL,
+        };
+
         self.db
             .prepare(
                 r#"
                 INSERT INTO sponsor_packages
                     (id, event_slug, name, advantage, category, group_id, price_idr,
                      price_usd, minimum_spend_idr, max_sponsors, reserved_sponsors, is_unlocked,
-                     image_url, display_order, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, ?, ?, datetime('now'))
+                     image_url, deadline_date, display_order, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, 1, ?, ?, ?, datetime('now'))
             "#,
             )
             .bind(&[
@@ -513,6 +518,7 @@ impl SponsorPackageRepository {
                     .map(JsValue::from_f64)
                     .unwrap_or(JsValue::NULL),
                 image_url_val,
+                deadline_val,
                 JsValue::from_f64(next_order as f64),
             ])?
             .run()
@@ -619,6 +625,7 @@ impl SponsorPackageRepository {
                 is_unlocked = ?,
                 group_id = ?,
                 image_url = ?,
+                deadline_date = ?,
                 updated_at = datetime('now')
             WHERE event_slug = ? AND id = ?
         "#;
@@ -674,6 +681,18 @@ impl SponsorPackageRepository {
                 Some(url) if !url.trim().is_empty() => JsValue::from_str(url.trim()),
                 _ => JsValue::NULL,
             };
+            let existing_deadline_date = existing_packages
+                .iter()
+                .find(|p| p.id == u.id)
+                .and_then(|p| p.deadline_date.as_deref());
+            let deadline_date = match u.deadline_date.as_ref() {
+                Some(requested) => requested.as_deref(),
+                None => existing_deadline_date,
+            };
+            let deadline_date = match deadline_date {
+                Some(d) if !d.trim().is_empty() => JsValue::from_str(d.trim()),
+                _ => JsValue::NULL,
+            };
             let stmt = self.db.prepare(package_sql).bind(&[
                 JsValue::from_str(u.name.trim()),
                 JsValue::from_str(u.advantage.trim()),
@@ -685,6 +704,7 @@ impl SponsorPackageRepository {
                 JsValue::from_bool(u.is_unlocked),
                 group_id,
                 image_url,
+                deadline_date,
                 JsValue::from_str(event_slug),
                 JsValue::from_str(&u.id),
             ])?;
@@ -1375,6 +1395,7 @@ mod tests {
             reserved_sponsors: 0,
             is_unlocked: true,
             image_url: None,
+            deadline_date: None,
             display_order: 1,
             updated_at: "2026-01-01 00:00:00".to_string(),
         }
@@ -1393,6 +1414,7 @@ mod tests {
             is_unlocked: true,
             group_id: None,
             image_url: None,
+            deadline_date: None,
         }
     }
 

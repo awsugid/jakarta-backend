@@ -51,6 +51,8 @@ pub struct SponsorPackage {
     pub is_unlocked: bool,
     #[serde(alias = "image_url")]
     pub image_url: Option<String>,
+    #[serde(alias = "deadline_date")]
+    pub deadline_date: Option<String>,
     #[serde(alias = "display_order")]
     pub display_order: i32,
     #[serde(alias = "updated_at")]
@@ -84,6 +86,10 @@ pub struct SponsorPackageUpdate {
     pub group_id: Option<String>,
     /// Placement visual image URL.
     pub image_url: Option<String>,
+    /// Optional deadline date (e.g. YYYY-MM-DD); triple state via double_option:
+    /// omitted = leave unchanged, null = clear, string = set.
+    #[serde(default, deserialize_with = "double_option")]
+    pub deadline_date: Option<Option<String>>,
 }
 
 /// POST /api/admin/events/:eventSlug/sponsor-packages body. The server owns
@@ -102,6 +108,9 @@ pub struct SponsorPackageCreate {
     pub price_usd: Option<f64>,
     /// Optional placement visual image URL.
     pub image_url: Option<String>,
+    /// Optional deadline date (e.g. YYYY-MM-DD); omitted or null = no deadline.
+    #[serde(default, alias = "deadline_date")]
+    pub deadline_date: Option<String>,
 }
 
 /// Entry of the groups array of the admin PUT body (rename/reorder only;
@@ -399,6 +408,7 @@ mod tests {
             reserved_sponsors: 2,
             is_unlocked: true,
             image_url: None,
+            deadline_date: None,
             display_order: 5,
             updated_at: "2026-09-02 12:34:56".into(),
         };
@@ -574,6 +584,7 @@ mod tests {
             reserved_sponsors: 0,
             is_unlocked: true,
             image_url: None,
+            deadline_date: None,
             display_order: 1,
             updated_at: "2026-09-02 12:34:56".into(),
         };
@@ -586,17 +597,37 @@ mod tests {
         .unwrap();
         assert!(ungrouped["groupId"].is_null());
 
-        // D1 snake_case row with group_id deserializes.
+        // D1 snake_case row with deadline_date deserializes.
         let row = r#"{
             "id": "tshirt", "event_slug": "community-day-2026",
             "name": "T-Shirt", "advantage": "Merch", "category": "onsite",
             "group_id": "onsite-physical", "price_idr": 6000000,
             "minimum_spend_idr": null, "max_sponsors": null,
             "reserved_sponsors": 0, "is_unlocked": 1,
+            "deadline_date": "2026-10-25",
             "display_order": 5, "updated_at": "2026-09-02 12:34:56"
         }"#;
         let pkg: SponsorPackage = serde_json::from_str(row).unwrap();
-        assert_eq!(pkg.group_id.as_deref(), Some("onsite-physical"));
+        assert_eq!(pkg.deadline_date.as_deref(), Some("2026-10-25"));
+    }
+
+    #[test]
+    fn update_entry_deadline_date_triple_state() {
+        let base = r#"{"id":"tshirt","name":"T-Shirt","advantage":"Merch","priceIdr":6000000,"reservedSponsors":0,"isUnlocked":true"#;
+        // Omitted = None
+        let omitted: SponsorPackageUpdate = serde_json::from_str(&format!("{base}}}")).unwrap();
+        assert_eq!(omitted.deadline_date, None);
+        // Explicit null = Some(None) (clear)
+        let null: SponsorPackageUpdate =
+            serde_json::from_str(&format!("{base},\"deadlineDate\":null}}")).unwrap();
+        assert_eq!(null.deadline_date, Some(None));
+        // String = Some(Some("2026-10-25"))
+        let set: SponsorPackageUpdate =
+            serde_json::from_str(&format!("{base},\"deadlineDate\":\"2026-10-25\"}}")).unwrap();
+        assert_eq!(
+            set.deadline_date,
+            Some(Some("2026-10-25".to_string()))
+        );
     }
 
     #[test]
