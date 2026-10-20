@@ -624,10 +624,7 @@ mod tests {
         // String = Some(Some("2026-10-25"))
         let set: SponsorPackageUpdate =
             serde_json::from_str(&format!("{base},\"deadlineDate\":\"2026-10-25\"}}")).unwrap();
-        assert_eq!(
-            set.deadline_date,
-            Some(Some("2026-10-25".to_string()))
-        );
+        assert_eq!(set.deadline_date, Some(Some("2026-10-25".to_string())));
     }
 
     #[test]

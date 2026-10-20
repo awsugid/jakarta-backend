@@ -408,6 +408,63 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             },
         )
         // ---------------------------------------------------------------
+        // Sessionize Integration (cached, with search and filtering)
+        // ---------------------------------------------------------------
+        .get_async("/api/sessionize/speakers", |req, ctx| async move {
+            crate::http::sessionize::handle_get_sessionize_speakers(req, ctx).await
+        })
+        .get_async("/api/sessionize/sessions", |req, ctx| async move {
+            crate::http::sessionize::handle_get_sessionize_sessions(req, ctx).await
+        })
+        .get_async("/api/sessionize/data", |req, ctx| async move {
+            crate::http::sessionize::handle_get_sessionize_data(req, ctx).await
+        })
+        // ---------------------------------------------------------------
+        // GET /api/events/:eventSlug/schedule — public active schedule
+        // ---------------------------------------------------------------
+        .get_async("/api/events/:eventSlug/schedule", |req, ctx| async move {
+            crate::http::schedule::handle_public_schedule(req, ctx).await
+        })
+        // ---------------------------------------------------------------
+        // Admin — Event Schedule Management (admin-only)
+        // ---------------------------------------------------------------
+        .get_async(
+            "/api/admin/events/:eventSlug/schedule",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_list_schedule(req, ctx).await
+            },
+        )
+        .post_async(
+            "/api/admin/events/:eventSlug/schedule",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_create_schedule(req, ctx).await
+            },
+        )
+        .put_async(
+            "/api/admin/events/:eventSlug/schedule/order",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_reorder_schedule(req, ctx).await
+            },
+        )
+        .post_async(
+            "/api/admin/events/:eventSlug/schedule/sync-sessionize",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_sync_sessionize(req, ctx).await
+            },
+        )
+        .put_async(
+            "/api/admin/events/:eventSlug/schedule/:itemId",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_update_schedule(req, ctx).await
+            },
+        )
+        .delete_async(
+            "/api/admin/events/:eventSlug/schedule/:itemId",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_delete_schedule(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
         // POST /api/admin/events/:eventSlug/sponsor-mockup — upload sponsor placement mockup image to Cloudflare R2 (admin-only)
         // ---------------------------------------------------------------
         .post_async(

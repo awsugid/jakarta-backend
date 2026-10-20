@@ -7,6 +7,8 @@ mod formbricks;
 mod http;
 mod links;
 mod pretix;
+mod schedule;
+mod sessionize;
 mod speakers;
 mod sponsors;
 mod statistics;
