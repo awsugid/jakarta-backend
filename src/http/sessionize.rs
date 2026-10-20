@@ -61,7 +61,7 @@ pub async fn handle_get_sessionize_speakers(
     let payload = client
         .get_data(filter.fresh)
         .await
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(AppError::Internal)?;
 
     let filtered = SessionizeClient::apply_filters(payload, &filter);
 
@@ -86,7 +86,7 @@ pub async fn handle_get_sessionize_sessions(
     let payload = client
         .get_data(filter.fresh)
         .await
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(AppError::Internal)?;
 
     let filtered = SessionizeClient::apply_filters(payload, &filter);
 
@@ -108,7 +108,7 @@ pub async fn handle_get_sessionize_data(req: Request, ctx: RouteContext<()>) -> 
     let payload = client
         .get_data(filter.fresh)
         .await
-        .map_err(|e| AppError::Internal(e))?;
+        .map_err(AppError::Internal)?;
 
     let filtered = SessionizeClient::apply_filters(payload, &filter);
 
