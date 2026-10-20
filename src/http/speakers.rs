@@ -4,12 +4,14 @@ use crate::auth::admin::require_admin;
 use crate::config::AppConfig;
 use crate::http::errors::AppError;
 use crate::http::response::{json_success_cors, with_cors};
+use crate::sessionize::client::SessionizeClient;
 use crate::speakers::repository::{
     CreateSpeakerError, DeleteSpeakerError, ReorderSpeakersError, SpeakerRepository,
     UpdateSpeakerError,
 };
 use crate::speakers::types::{
     EventSpeakerCreate, EventSpeakerReorderBody, EventSpeakerUpdate, EventSpeakersResponse,
+    SyncSessionizeSpeakersRequest,
 };
 
 const MAX_EVENT_SLUG_LEN: usize = 100;
@@ -398,4 +400,51 @@ pub async fn handle_admin_upload_speaker_asset(
         "key": key
     });
     json_success_cors(&body, &config.allowed_origins, origin.as_deref())
+}
+
+/// POST /api/admin/events/:eventSlug/speakers/sync-sessionize — sync or import speakers from Sessionize.
+pub async fn handle_admin_sync_sessionize_speakers(
+    mut req: Request,
+    ctx: RouteContext<()>,
+) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+    validate_event_slug(event_slug)?;
+
+    let body = req.json::<SyncSessionizeSpeakersRequest>().await.unwrap_or(
+        SyncSessionizeSpeakersRequest {
+            speaker_ids: None,
+            overwrite: Some(true),
+            fresh: Some(false),
+        },
+    );
+
+    let client = SessionizeClient::default();
+    let sessionize_data = client
+        .get_data(body.fresh.unwrap_or(false))
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch from Sessionize: {e}")))?;
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = SpeakerRepository::new(db);
+
+    let result = repo
+        .sync_from_sessionize(
+            event_slug,
+            sessionize_data.speakers,
+            body.speaker_ids,
+            body.overwrite.unwrap_or(true),
+        )
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    json_success_cors(&result, &config.allowed_origins, origin.as_deref())
 }
