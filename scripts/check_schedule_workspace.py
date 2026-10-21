@@ -60,6 +60,15 @@ def main() -> None:
     )
     assert "?4" not in publish_guard_sql, "publish_guard_sql must not reference ?4"
 
+    # D1 first(None) returns a row object, not a scalar column value.
+    source = SCHEDULE_RS.read_text()
+    assert 'first::<f64>(Some("revision"))' in source, (
+        'workspace_revision must select the revision column for scalar decoding'
+    )
+    assert not re.search(r'first::<(?:f64|i64|u32|u64|bool|String)>\(None\)', source), (
+        'scalar D1 first() must select a column, not the whole row'
+    )
+
     conn = sqlite3.connect(":memory:")
     # Upgrade path: legacy tables first, seed rows, THEN the workspace
     # migrations — exactly what a production D1 upgrade sees.

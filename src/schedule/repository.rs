@@ -381,7 +381,7 @@ impl ScheduleRepository {
             .db
             .prepare(sql)
             .bind(&[JsValue::from_str(event_slug)])?
-            .first::<f64>(None)
+            .first::<f64>(Some("revision"))
             .await?
             .unwrap_or(1.0);
         Ok(rev as i64)
