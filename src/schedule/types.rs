@@ -2,6 +2,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::links::types::deserialize_d1_bool;
 
+/// D1 stores JSON string arrays (`room_ids_json`, `speaker_ids_json`); accept
+/// the D1 string form, native arrays, null, and empty strings.
+pub fn deserialize_id_list<'de, D>(d: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Null => Ok(Vec::new()),
+        serde_json::Value::String(s) if s.trim().is_empty() => Ok(Vec::new()),
+        serde_json::Value::String(s) => serde_json::from_str(&s).map_err(D::Error::custom),
+        other => serde_json::from_value(other).map_err(D::Error::custom),
+    }
+}
+
 /// One entry of a schedule item's speakers array.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,18 +128,42 @@ pub struct EventScheduleItem {
     pub speakers: Vec<ScheduleSpeaker>,
     pub room: Option<String>,
     pub track: Option<String>,
-    #[serde(alias = "starts_at")]
+    #[serde(
+        default,
+        alias = "room_ids_json",
+        deserialize_with = "deserialize_id_list"
+    )]
+    pub room_ids: Vec<String>,
+    #[serde(
+        default,
+        alias = "speaker_ids_json",
+        deserialize_with = "deserialize_id_list"
+    )]
+    pub speaker_ids: Vec<String>,
+    #[serde(default, alias = "all_rooms", deserialize_with = "deserialize_d1_bool")]
+    pub all_rooms: bool,
+    /// Resolved room names (admin listing and published snapshot only; not a column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rooms: Option<Vec<String>>,
+    #[serde(default, alias = "starts_at")]
     pub starts_at: Option<String>,
     #[serde(alias = "ends_at")]
     pub ends_at: Option<String>,
     #[serde(alias = "session_type")]
     pub session_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "format_id")]
+    pub format_id: Option<String>,
+    /// Resolved format name (admin listing and published snapshot only; not a column).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
     #[serde(alias = "is_service_session", deserialize_with = "deserialize_d1_bool")]
     pub is_service_session: bool,
     #[serde(alias = "is_active", deserialize_with = "deserialize_d1_bool")]
     pub is_active: bool,
     #[serde(alias = "display_order")]
     pub display_order: i32,
+    #[serde(default, alias = "revision")]
+    pub revision: i32,
     #[serde(alias = "created_at")]
     pub created_at: String,
     #[serde(alias = "updated_at")]
@@ -146,8 +185,14 @@ pub struct CreateScheduleItem {
     pub speaker_social_url: Option<String>,
     /// Full speaker list. When present, singular columns mirror the first entry.
     pub speakers: Option<Vec<ScheduleSpeaker>>,
+    /// Directory speaker ids; server resolves display details from `event_speakers`.
+    /// Wins over `speakers` when both are present.
+    pub speaker_ids: Option<Vec<String>>,
     pub room: Option<String>,
     pub track: Option<String>,
+    pub room_ids: Option<Vec<String>>,
+    pub all_rooms: Option<bool>,
+    pub format_id: Option<String>,
     pub starts_at: Option<String>,
     pub ends_at: Option<String>,
     pub session_type: Option<String>,
@@ -160,6 +205,7 @@ pub struct CreateScheduleItem {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateScheduleItem {
+    pub revision: i32,
     pub session_id: Option<String>,
     pub title: Option<String>,
     pub description: Option<String>,
@@ -171,8 +217,14 @@ pub struct UpdateScheduleItem {
     pub speaker_social_url: Option<String>,
     /// Full speaker list. `None` (omitted) keeps existing speakers, `Some([])` clears.
     pub speakers: Option<Vec<ScheduleSpeaker>>,
+    /// Directory speaker ids; when present, wins over `speakers` and singular fields.
+    pub speaker_ids: Option<Vec<String>>,
     pub room: Option<String>,
     pub track: Option<String>,
+    pub room_ids: Option<Vec<String>>,
+    pub all_rooms: Option<bool>,
+    /// Format id; empty string clears the link (label falls back to sessionType).
+    pub format_id: Option<String>,
     pub starts_at: Option<String>,
     pub ends_at: Option<String>,
     pub session_type: Option<String>,
@@ -220,6 +272,140 @@ pub struct SyncSessionizeResponse {
 pub struct EventScheduleResponse<'a> {
     pub event_slug: &'a str,
     pub schedule: &'a [EventScheduleItem],
+}
+
+/// Admin listing: schedule plus the workspace revision (review/publish token)
+/// and the last publication timestamp, if any.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminScheduleResponse<'a> {
+    pub event_slug: &'a str,
+    pub schedule: &'a [EventScheduleItem],
+    pub revision: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
+}
+
+/// Row from the `event_rooms` table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventRoom {
+    pub id: String,
+    #[serde(alias = "event_slug")]
+    pub event_slug: String,
+    pub name: String,
+    #[serde(alias = "display_order")]
+    pub display_order: i32,
+    #[serde(alias = "archived", deserialize_with = "deserialize_d1_bool")]
+    pub archived: bool,
+    #[serde(default, alias = "revision")]
+    pub revision: i32,
+    #[serde(alias = "created_at")]
+    pub created_at: String,
+    #[serde(alias = "updated_at")]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventRoomsResponse<'a> {
+    pub event_slug: &'a str,
+    pub rooms: &'a [EventRoom],
+}
+
+/// POST /api/admin/events/:eventSlug/rooms body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateRoomBody {
+    pub name: String,
+    pub display_order: Option<i32>,
+}
+
+/// PUT /api/admin/events/:eventSlug/rooms/:roomId body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateRoomBody {
+    pub revision: i32,
+    pub name: Option<String>,
+    pub display_order: Option<i32>,
+    pub archived: Option<bool>,
+}
+
+/// Row from the `event_formats` table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventFormat {
+    pub id: String,
+    #[serde(alias = "event_slug")]
+    pub event_slug: String,
+    pub name: String,
+    #[serde(alias = "display_order")]
+    pub display_order: i32,
+    #[serde(alias = "archived", deserialize_with = "deserialize_d1_bool")]
+    pub archived: bool,
+    #[serde(default, alias = "revision")]
+    pub revision: i32,
+    #[serde(alias = "created_at")]
+    pub created_at: String,
+    #[serde(alias = "updated_at")]
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventFormatsResponse<'a> {
+    pub event_slug: &'a str,
+    pub formats: &'a [EventFormat],
+}
+
+/// POST /api/admin/events/:eventSlug/formats body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateFormatBody {
+    pub name: String,
+    pub display_order: Option<i32>,
+}
+
+/// PUT /api/admin/events/:eventSlug/formats/:formatId body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateFormatBody {
+    pub revision: i32,
+    pub name: Option<String>,
+    pub display_order: Option<i32>,
+    pub archived: Option<bool>,
+}
+
+/// Stored published snapshot document.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicationSnapshotDoc {
+    pub schedule: Vec<EventScheduleItem>,
+}
+
+/// Row from `event_schedule_publications` (fields the API needs).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicationRow {
+    #[serde(alias = "snapshot_json")]
+    pub snapshot_json: String,
+    #[serde(alias = "published_at")]
+    pub published_at: String,
+}
+
+/// POST /api/admin/events/:eventSlug/schedule/publish body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishBody {
+    pub revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishResponse {
+    pub published_at: String,
+    pub item_count: usize,
+    pub revision: i64,
 }
 
 #[cfg(test)]

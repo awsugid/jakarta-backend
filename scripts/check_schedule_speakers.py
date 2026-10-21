@@ -45,10 +45,17 @@ def db_with(*names):
     return db
 
 def fresh_db():
-    return db_with(*PRE_0025, MIGRATION_0025)
+    return db_with(
+        *PRE_0025,
+        MIGRATION_0025,
+        "0026_schedule_workspace.sql",
+        "0027_publications_backfill.sql",
+        "0028_talk_formats.sql",
+        "0029_workspace_revision_triggers.sql",
+    )
 
 def run_create(db, item_id, event, speakers_json, **cols):
-    """Mirror of create_schedule_item bind order (is_active literal, display 0..)."""
+    """Mirror of create_schedule_item bind order."""
     cur = db.execute(
         CREATE_SQL,
         (
@@ -57,12 +64,13 @@ def run_create(db, item_id, event, speakers_json, **cols):
             cols.get("speaker_company"), cols.get("speaker_avatar"), cols.get("speaker_social_url"),
             None, None, None, None, "Technical Session", 0, 1, 0,
             speakers_json,
+            "[]", 0, "[]", None,
         ),
     )
     db.commit()
     return cur
 
-def run_update(db, event, item_id, speakers_json, title="T", speaker_name=None):
+def run_update(db, event, item_id, speakers_json, title="T", speaker_name=None, revision=1):
     """Mirror of update_schedule_item bind order (speakers_json None = preserve)."""
     cur = db.execute(
         UPDATE_SQL,
@@ -70,8 +78,10 @@ def run_update(db, event, item_id, speakers_json, title="T", speaker_name=None):
             None, title, None,
             None, speaker_name, None, None, None, None,
             speakers_json,
-            None, None, None, None, None, 0, 1, 0,
-            event, item_id,
+            None,
+            None, None, None, None, "Technical Session", None,
+            "[]", 0, 0, 1, 0,
+            event, item_id, revision,
         ),
     )
     db.commit()
@@ -136,19 +146,19 @@ def test_update_preserves_clears_and_legacy_path_keeps_array():
     run_create(db, "sched-1", "cd-2025", two, speaker_id="ada", speaker_name="Ada")
 
     # omitted speakers (None) -> COALESCE keeps array even on unrelated field edits
-    run_update(db, "cd-2025", "sched-1", None, title="Renamed Talk")
+    run_update(db, "cd-2025", "sched-1", None, title="Renamed Talk", revision=1)
     assert speakers_of(db, "sched-1") == json.loads(two)
     title = db.execute("SELECT title FROM event_schedules WHERE id = 'sched-1'").fetchone()[0]
     assert title == "Renamed Talk"
 
     # legacy singular-only edit: array untouched (array is source of truth now)
-    run_update(db, "cd-2025", "sched-1", None, speaker_name="Admin Edit")
+    run_update(db, "cd-2025", "sched-1", None, speaker_name="Admin Edit", revision=2)
     assert speakers_of(db, "sched-1") == json.loads(two)
     name = db.execute("SELECT speaker_name FROM event_schedules WHERE id = 'sched-1'").fetchone()[0]
     assert name == "Admin Edit"
 
     # explicit [] clears array AND singular columns
-    run_update(db, "cd-2025", "sched-1", "[]")
+    run_update(db, "cd-2025", "sched-1", "[]", revision=3)
     row = db.execute(
         "SELECT speakers_json, speaker_id, speaker_name FROM event_schedules WHERE id = 'sched-1'"
     ).fetchone()
@@ -175,7 +185,7 @@ def test_import_all_speakers_with_local_id_mapping_and_insert_only():
         IMPORT_SQL,
         ("sched-s1", "cd-2025", "sess-1", "Joint Talk", None,
          "ada", "Ada", None, None, None, None,
-         None, None, None, None, "Technical Session", 0, 0, two),
+         "Technical Session", 0, 0, two, '["ada","grace"]'),
     )
     assert cur.rowcount == 1
     assert speakers_of(db, "sched-s1") == json.loads(two)  # BOTH speakers stored
@@ -192,7 +202,7 @@ def test_import_all_speakers_with_local_id_mapping_and_insert_only():
         IMPORT_SQL,
         ("sched-s1-dup", "cd-2025", "sess-1", "Joint Talk", None,
          "ada", "Ada", None, None, None, None,
-         None, None, None, None, "Technical Session", 0, 0, two),
+         "Technical Session", 0, 0, two, "[]"),
     )
     assert cur.rowcount == 0  # conflict on (event_slug, session_id) ignored
     assert speakers_of(db, "sched-s1") == [{"name": "Admin Curated"}]
@@ -203,7 +213,7 @@ def test_import_all_speakers_with_local_id_mapping_and_insert_only():
         IMPORT_SQL,
         ("sched-s2", "cd-2025", "sess-2", "Lunch", None,
          None, None, None, None, None, None,
-         None, None, None, None, "Service Session", 1, 1, "[]"),
+         "Service Session", 1, 0, "[]", "[]"),
     )
     db.commit()
     assert speakers_of(db, "sched-s2") == []

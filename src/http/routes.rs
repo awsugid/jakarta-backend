@@ -471,6 +471,54 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
             },
         )
         // ---------------------------------------------------------------
+        // Schedule workspace: rooms, talk formats, review + publish
+        // ---------------------------------------------------------------
+        .get_async(
+            "/api/admin/events/:eventSlug/schedule/review",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_review_schedule(req, ctx).await
+            },
+        )
+        .post_async(
+            "/api/admin/events/:eventSlug/schedule/publish",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_publish_schedule(req, ctx).await
+            },
+        )
+        .get_async("/api/admin/events/:eventSlug/rooms", |req, ctx| async move {
+            crate::http::schedule::handle_admin_list_rooms(req, ctx).await
+        })
+        .post_async(
+            "/api/admin/events/:eventSlug/rooms",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_create_room(req, ctx).await
+            },
+        )
+        .put_async(
+            "/api/admin/events/:eventSlug/rooms/:roomId",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_update_room(req, ctx).await
+            },
+        )
+        .get_async(
+            "/api/admin/events/:eventSlug/formats",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_list_formats(req, ctx).await
+            },
+        )
+        .post_async(
+            "/api/admin/events/:eventSlug/formats",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_create_format(req, ctx).await
+            },
+        )
+        .put_async(
+            "/api/admin/events/:eventSlug/formats/:formatId",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_update_format(req, ctx).await
+            },
+        )
+        // ---------------------------------------------------------------
         // POST /api/admin/events/:eventSlug/sponsor-mockup — upload sponsor placement mockup image to Cloudflare R2 (admin-only)
         // ---------------------------------------------------------------
         .post_async(

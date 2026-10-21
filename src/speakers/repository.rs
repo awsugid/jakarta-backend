@@ -208,6 +208,8 @@ impl SpeakerRepository {
             ])?
             .run()
             .await?;
+        // Directory details freeze into schedule snapshots at publish, so any
+        // directory mutation invalidates review/publish tokens.
 
         let created = self.get_speaker(event_slug, &id).await?.ok_or_else(|| {
             worker::Error::RustError("Failed to load created speaker".to_string())
