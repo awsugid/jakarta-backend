@@ -407,6 +407,12 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                 crate::http::speakers::handle_admin_upload_speaker_asset(req, ctx).await
             },
         )
+        .post_async(
+            "/api/admin/events/:eventSlug/speakers/sync-sessionize",
+            |req, ctx| async move {
+                crate::http::speakers::handle_admin_sync_sessionize_speakers(req, ctx).await
+            },
+        )
         // ---------------------------------------------------------------
         // Sessionize Integration (cached, with search and filtering)
         // ---------------------------------------------------------------

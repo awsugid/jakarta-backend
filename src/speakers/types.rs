@@ -87,3 +87,22 @@ pub struct EventSpeakersResponse<'a> {
     pub event_slug: &'a str,
     pub speakers: &'a [EventSpeaker],
 }
+
+/// POST /api/admin/events/:eventSlug/speakers/sync-sessionize body.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncSessionizeSpeakersRequest {
+    pub speaker_ids: Option<Vec<String>>,
+    pub overwrite: Option<bool>,
+    pub fresh: Option<bool>,
+}
+
+/// Response from POST /api/admin/events/:eventSlug/speakers/sync-sessionize.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncSpeakersResponse {
+    pub total_processed: usize,
+    pub imported: usize,
+    pub updated: usize,
+    pub skipped: usize,
+}

@@ -1,7 +1,9 @@
 use worker::{d1::D1Database, wasm_bindgen::JsValue, Result as WorkerResult};
 
+use crate::sessionize::types::EnrichedSpeaker;
 use crate::speakers::types::{
     EventSpeaker, EventSpeakerCreate, EventSpeakerOrderItem, EventSpeakerUpdate,
+    SyncSpeakersResponse,
 };
 
 #[derive(Debug)]
@@ -385,6 +387,167 @@ impl SpeakerRepository {
         }
 
         self.list_speakers(event_slug).await.map_err(Into::into)
+    }
+
+    /// Sync or import speakers from Sessionize into event_speakers.
+    pub async fn sync_from_sessionize(
+        &self,
+        event_slug: &str,
+        speakers: Vec<EnrichedSpeaker>,
+        selected_ids: Option<Vec<String>>,
+        overwrite: bool,
+    ) -> WorkerResult<SyncSpeakersResponse> {
+        let current_speakers = self.list_speakers(event_slug).await?;
+        let mut imported = 0;
+        let mut updated = 0;
+        let mut skipped = 0;
+        let mut max_order = current_speakers
+            .iter()
+            .map(|s| s.display_order)
+            .max()
+            .unwrap_or(0);
+
+        for spk in speakers {
+            if let Some(ref sel) = selected_ids {
+                if !sel.contains(&spk.id) {
+                    continue;
+                }
+            }
+
+            let name_trim = spk.full_name.trim();
+            if name_trim.is_empty() {
+                skipped += 1;
+                continue;
+            }
+
+            let role = spk
+                .job_title
+                .clone()
+                .or_else(|| spk.tag_line.clone())
+                .unwrap_or_else(|| "Speaker".to_string());
+            let company = spk.company.clone();
+            let photo_url = spk
+                .profile_picture
+                .clone()
+                .unwrap_or_else(|| "/images/avatar-placeholder.png".to_string());
+            let talk_title = spk
+                .sessions
+                .first()
+                .map(|s| s.title.clone())
+                .unwrap_or_else(|| "Technical Session".to_string());
+            let talk_format = if spk.is_top_speaker {
+                "Keynote"
+            } else {
+                "Technical Session"
+            };
+            let bio = spk.bio.clone();
+            let social_url = spk
+                .linkedin_url
+                .clone()
+                .or_else(|| spk.links.first().map(|l| l.url.clone()));
+
+            // Find existing by matching name case-insensitively or matching ID
+            let existing = current_speakers
+                .iter()
+                .find(|s| s.name.trim().eq_ignore_ascii_case(name_trim));
+
+            if let Some(ex) = existing {
+                if overwrite {
+                    let update_sql = r#"
+                        UPDATE event_speakers SET
+                            role = ?, company = ?, photo_url = ?, talk_title = ?, talk_format = ?,
+                            topic_image_url = COALESCE(topic_image_url, ?),
+                            bio = COALESCE(?, bio), social_url = COALESCE(?, social_url),
+                            updated_at = datetime('now')
+                        WHERE event_slug = ? AND id = ?
+                    "#;
+                    let company_val = match company.as_deref() {
+                        Some(c) if !c.trim().is_empty() => JsValue::from_str(c.trim()),
+                        _ => JsValue::NULL,
+                    };
+                    let bio_val = match bio.as_deref() {
+                        Some(b) if !b.trim().is_empty() => JsValue::from_str(b.trim()),
+                        _ => JsValue::NULL,
+                    };
+                    let social_val = match social_url.as_deref() {
+                        Some(u) if !u.trim().is_empty() => JsValue::from_str(u.trim()),
+                        _ => JsValue::NULL,
+                    };
+
+                    self.db
+                        .prepare(update_sql)
+                        .bind(&[
+                            JsValue::from_str(role.trim()),
+                            company_val,
+                            JsValue::from_str(photo_url.trim()),
+                            JsValue::from_str(talk_title.trim()),
+                            JsValue::from_str(talk_format),
+                            JsValue::from_str(photo_url.trim()),
+                            bio_val,
+                            social_val,
+                            JsValue::from_str(event_slug),
+                            JsValue::from_str(&ex.id),
+                        ])?
+                        .run()
+                        .await?;
+                    updated += 1;
+                } else {
+                    skipped += 1;
+                }
+            } else {
+                max_order += 1;
+                let base_slug = slugify(name_trim);
+                let id = generate_unique_id(&base_slug, |cand| {
+                    current_speakers.iter().any(|s| s.id == cand)
+                });
+
+                let insert_sql = r#"
+                    INSERT INTO event_speakers
+                      (event_slug, id, name, role, company, photo_url, talk_title, talk_format,
+                       topic_image_url, bio, social_url, is_active, display_order)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                "#;
+                let company_val = match company.as_deref() {
+                    Some(c) if !c.trim().is_empty() => JsValue::from_str(c.trim()),
+                    _ => JsValue::NULL,
+                };
+                let bio_val = match bio.as_deref() {
+                    Some(b) if !b.trim().is_empty() => JsValue::from_str(b.trim()),
+                    _ => JsValue::NULL,
+                };
+                let social_val = match social_url.as_deref() {
+                    Some(u) if !u.trim().is_empty() => JsValue::from_str(u.trim()),
+                    _ => JsValue::NULL,
+                };
+
+                self.db
+                    .prepare(insert_sql)
+                    .bind(&[
+                        JsValue::from_str(event_slug),
+                        JsValue::from_str(&id),
+                        JsValue::from_str(name_trim),
+                        JsValue::from_str(role.trim()),
+                        company_val,
+                        JsValue::from_str(photo_url.trim()),
+                        JsValue::from_str(talk_title.trim()),
+                        JsValue::from_str(talk_format),
+                        JsValue::from_str(photo_url.trim()),
+                        bio_val,
+                        social_val,
+                        JsValue::from_f64(max_order as f64),
+                    ])?
+                    .run()
+                    .await?;
+                imported += 1;
+            }
+        }
+
+        Ok(SyncSpeakersResponse {
+            total_processed: imported + updated + skipped,
+            imported,
+            updated,
+            skipped,
+        })
     }
 }
 
