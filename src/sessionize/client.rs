@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use worker::{Cache, Fetch, Method, Request, RequestInit, Response};
+use worker::{d1::D1Database, wasm_bindgen::JsValue, Fetch, Method, Request, RequestInit};
 
 use crate::sessionize::types::{
     EnrichedSession, EnrichedSessionSpeaker, EnrichedSpeaker, EnrichedSpeakerSession,
@@ -9,8 +9,9 @@ use crate::sessionize::types::{
 
 pub const DEFAULT_SPEAKERS_URL: &str = "https://sessionize.com/api/v2/egep9rxt/view/Speakers";
 pub const DEFAULT_SESSIONS_URL: &str = "https://sessionize.com/api/v2/egep9rxt/view/Sessions";
-const CACHE_KEY: &str = "https://jakarta-backend.local/cache/sessionize-data-v2";
-const CACHE_TTL_SECONDS: u32 = 900; // 15 minutes edge cache
+
+/// Error message prefix returned by `get_data` when no snapshot exists yet.
+pub const NO_SNAPSHOT_ERROR: &str = "No Sessionize snapshot in D1 yet; an admin must run a fresh sync (fresh=true) or wait for the scheduled refresh";
 
 pub struct SessionizeClient {
     speakers_url: String,
@@ -31,40 +32,158 @@ impl SessionizeClient {
         }
     }
 
-    /// Fetch data from Sessionize or return from Cloudflare edge cache.
-    pub async fn get_data(&self, fresh: bool) -> Result<SessionizeDataPayload, String> {
-        let cache = Cache::default();
-
+    /// Read the D1 snapshot (non-fresh) or fetch upstream, filter to accepted
+    /// sessions, and persist a new snapshot (fresh). Public reads never touch
+    /// upstream; a missing snapshot is an error until an admin/scheduled job
+    /// initializes it. Upstream failure leaves the stored snapshot untouched.
+    pub async fn get_data(
+        &self,
+        db: &D1Database,
+        fresh: bool,
+    ) -> Result<SessionizeDataPayload, String> {
         if !fresh {
-            if let Ok(Some(mut cached_resp)) = cache.get(CACHE_KEY, true).await {
-                if let Ok(body) = cached_resp.text().await {
-                    if let Ok(payload) = serde_json::from_str::<SessionizeDataPayload>(&body) {
-                        return Ok(payload);
-                    }
+            let payload = Self::read_snapshot(db, &self.speakers_url, &self.sessions_url).await?;
+            // Defensive: snapshots are filtered at write time, but re-apply so a
+            // stale/hand-edited row can never leak non-accepted sessions.
+            return Ok(Self::retain_accepted_sessions(payload));
+        }
+
+        let (raw_speakers, raw_session_groups) = self.fetch_upstream().await?;
+        let payload = Self::retain_accepted_sessions(
+            self.build_enriched_payload(raw_speakers, raw_session_groups),
+        );
+        Self::write_snapshot(db, &self.speakers_url, &self.sessions_url, &payload).await?;
+        Ok(payload)
+    }
+
+    async fn read_snapshot(
+        db: &D1Database,
+        speakers_url: &str,
+        sessions_url: &str,
+    ) -> Result<SessionizeDataPayload, String> {
+        let sql = "SELECT payload FROM sessionize_source_cache \
+                   WHERE id = 1 AND speakers_url = ?1 AND sessions_url = ?2";
+        let bind_values = vec![
+            JsValue::from_str(speakers_url),
+            JsValue::from_str(sessions_url),
+        ];
+        let row = db
+            .prepare(sql)
+            .bind(&bind_values)
+            .map_err(|e| format!("failed to prepare snapshot read: {e}"))?
+            .first::<String>(Some("payload"))
+            .await
+            .map_err(|e| format!("failed to read Sessionize snapshot from D1: {e}"))?;
+        let Some(row) = row else {
+            return Err(NO_SNAPSHOT_ERROR.to_string());
+        };
+        serde_json::from_str(&row)
+            .map_err(|e| format!("corrupt Sessionize snapshot: failed to parse payload: {e}"))
+    }
+
+    async fn write_snapshot(
+        db: &D1Database,
+        speakers_url: &str,
+        sessions_url: &str,
+        payload: &SessionizeDataPayload,
+    ) -> Result<(), String> {
+        let json = serde_json::to_string(payload)
+            .map_err(|e| format!("failed to serialize Sessionize payload: {e}"))?;
+        let sql = "INSERT INTO sessionize_source_cache \
+                   (id, speakers_url, sessions_url, payload, refreshed_at) \
+                   VALUES (1, ?1, ?2, ?3, datetime('now')) \
+                   ON CONFLICT(id) DO UPDATE SET \
+                   speakers_url = excluded.speakers_url, \
+                   sessions_url = excluded.sessions_url, \
+                   payload = excluded.payload, \
+                   refreshed_at = excluded.refreshed_at";
+        let bind_values = vec![
+            JsValue::from_str(speakers_url),
+            JsValue::from_str(sessions_url),
+            JsValue::from_str(&json),
+        ];
+        db.prepare(sql)
+            .bind(&bind_values)
+            .map_err(|e| format!("failed to prepare snapshot write: {e}"))?
+            .run()
+            .await
+            .map_err(|e| format!("failed to persist Sessionize snapshot to D1: {e}"))?;
+        Ok(())
+    }
+
+    /// Keep only sessions whose status is "Accepted" (case-insensitive).
+    /// Missing/unknown status fails closed (excluded). Speakers are kept only
+    /// when referenced by an accepted session, and each speaker's session list
+    /// is trimmed to accepted IDs. Metadata facets/counts are recomputed.
+    pub fn retain_accepted_sessions(payload: SessionizeDataPayload) -> SessionizeDataPayload {
+        let is_accepted = |s: &EnrichedSession| {
+            s.status
+                .as_deref()
+                .is_some_and(|st| st.trim().eq_ignore_ascii_case("accepted"))
+        };
+
+        let sessions: Vec<EnrichedSession> =
+            payload.sessions.into_iter().filter(is_accepted).collect();
+
+        let accepted_ids: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+        let referenced_speakers: HashSet<&str> = sessions
+            .iter()
+            .flat_map(|s| s.speakers.iter().map(|sp| sp.id.as_str()))
+            .collect();
+
+        let speakers: Vec<EnrichedSpeaker> = payload
+            .speakers
+            .into_iter()
+            .filter(|sp| referenced_speakers.contains(sp.id.as_str()))
+            .map(|mut sp| {
+                sp.sessions.retain(|s| accepted_ids.contains(s.id.as_str()));
+                sp
+            })
+            .collect();
+
+        let mut rooms: HashSet<String> = HashSet::new();
+        for sess in &sessions {
+            if let Some(rm) = &sess.room {
+                if !rm.trim().is_empty() {
+                    rooms.insert(rm.trim().to_string());
                 }
             }
         }
-
-        // Fetch both endpoints
-        let (raw_speakers, raw_session_groups) = self.fetch_upstream().await?;
-
-        // Process and enrich data
-        let payload = self.build_enriched_payload(raw_speakers, raw_session_groups);
-
-        // Put in edge cache
-        if let Ok(json_str) = serde_json::to_string(&payload) {
-            if let Ok(mut cache_resp) = Response::ok(&json_str) {
-                let headers = cache_resp.headers_mut();
-                let _ = headers.set("Content-Type", "application/json");
-                let _ = headers.set(
-                    "Cache-Control",
-                    &format!("public, max-age={CACHE_TTL_SECONDS}"),
-                );
-                let _ = cache.put(CACHE_KEY, cache_resp).await;
+        let mut job_titles: HashSet<String> = HashSet::new();
+        let mut companies: HashSet<String> = HashSet::new();
+        for sp in &speakers {
+            if let Some(j) = sp
+                .job_title
+                .as_deref()
+                .map(str::trim)
+                .filter(|j| !j.is_empty())
+            {
+                job_titles.insert(j.to_string());
+            }
+            if let Some(c) = sp
+                .company
+                .as_deref()
+                .map(str::trim)
+                .filter(|c| !c.is_empty())
+            {
+                companies.insert(c.to_string());
             }
         }
 
-        Ok(payload)
+        let metadata = SessionizeMetadata {
+            rooms: sorted_set(rooms),
+            job_titles: sorted_set(job_titles),
+            companies: sorted_set(companies),
+            total_speakers: speakers.len(),
+            total_sessions: sessions.len(),
+            cached_at: payload.metadata.cached_at,
+        };
+
+        SessionizeDataPayload {
+            speakers,
+            sessions,
+            metadata,
+        }
     }
 
     async fn fetch_upstream(
@@ -574,5 +693,178 @@ impl SessionizeClient {
             sessions,
             metadata: payload.metadata,
         }
+    }
+}
+
+fn sorted_set(set: HashSet<String>) -> Vec<String> {
+    let mut v: Vec<String> = set.into_iter().collect();
+    v.sort();
+    v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn payload_json() -> serde_json::Value {
+        json!({
+            "speakers": [
+                {
+                    "id": "sp1",
+                    "fullName": "Speaker One",
+                    "isTopSpeaker": false,
+                    "links": [],
+                    "sessions": [
+                        { "id": "s1", "title": "Talk One", "isServiceSession": false },
+                        { "id": "s3", "title": "Ghost Talk", "isServiceSession": false }
+                    ],
+                    "jobTitle": "Dev Rel",
+                    "company": "ACME"
+                },
+                {
+                    "id": "sp2",
+                    "fullName": "Speaker Two",
+                    "isTopSpeaker": false,
+                    "links": [],
+                    "sessions": [
+                        { "id": "s1", "title": "Talk One", "isServiceSession": false }
+                    ]
+                },
+                {
+                    "id": "sp3",
+                    "fullName": "Speaker Three",
+                    "isTopSpeaker": false,
+                    "links": [],
+                    "sessions": [
+                        { "id": "s2", "title": "Talk Two", "isServiceSession": false }
+                    ]
+                },
+                {
+                    "id": "sp4",
+                    "fullName": "Orphan Speaker",
+                    "isTopSpeaker": false,
+                    "links": [],
+                    "sessions": [
+                        { "id": "s3", "title": "Ghost Talk", "isServiceSession": false }
+                    ]
+                },
+                {
+                    "id": "sp5",
+                    "fullName": "Declined Speaker",
+                    "isTopSpeaker": false,
+                    "links": [],
+                    "sessions": []
+                }
+            ],
+            "sessions": [
+                {
+                    "id": "s1",
+                    "title": "Talk One",
+                    "status": "Accepted",
+                    "isServiceSession": false,
+                    "isPlenumSession": false,
+                    "room": "Room A",
+                    "speakers": [
+                        { "id": "sp1", "name": "Speaker One" },
+                        { "id": "sp2", "name": "Speaker Two" }
+                    ],
+                    "categories": []
+                },
+                {
+                    "id": "s2",
+                    "title": "Talk Two",
+                    "status": "accepted",
+                    "isServiceSession": false,
+                    "isPlenumSession": false,
+                    "room": "Room B",
+                    "speakers": [
+                        { "id": "sp3", "name": "Speaker Three" }
+                    ],
+                    "categories": []
+                },
+                {
+                    "id": "s3",
+                    "title": "Missing Status",
+                    "isServiceSession": false,
+                    "isPlenumSession": false,
+                    "room": "Room C",
+                    "speakers": [
+                        { "id": "sp4", "name": "Orphan Speaker" }
+                    ],
+                    "categories": []
+                },
+                {
+                    "id": "s4",
+                    "title": "Declined Talk",
+                    "status": "Declined",
+                    "isServiceSession": false,
+                    "isPlenumSession": false,
+                    "speakers": [
+                        { "id": "sp5", "name": "Declined Speaker" }
+                    ],
+                    "categories": []
+                }
+            ],
+            "metadata": {
+                "rooms": ["Room A", "Room B", "Room C"],
+                "jobTitles": ["Dev Rel", "Old Title"],
+                "companies": ["ACME", "Gone Corp"],
+                "totalSpeakers": 5,
+                "totalSessions": 4,
+                "cachedAt": "2026-10-21T00:00:00.000Z"
+            }
+        })
+    }
+
+    #[test]
+    fn retain_accepted_filters_sessions_and_speakers() {
+        let payload: SessionizeDataPayload =
+            serde_json::from_value(payload_json()).expect("payload must deserialize");
+        let filtered = SessionizeClient::retain_accepted_sessions(payload);
+
+        let session_ids: Vec<&str> = filtered.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            session_ids,
+            vec!["s1", "s2"],
+            "only Accepted sessions (case-insensitive) survive; missing/Declined excluded"
+        );
+
+        let speaker_ids: Vec<&str> = filtered.speakers.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            speaker_ids,
+            vec!["sp1", "sp2", "sp3"],
+            "speakers referenced only by non-accepted sessions are dropped"
+        );
+
+        let sp1 = filtered.speakers.iter().find(|s| s.id == "sp1").unwrap();
+        let sp1_sessions: Vec<&str> = sp1.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(
+            sp1_sessions,
+            vec!["s1"],
+            "speaker.sessions keeps only accepted session IDs"
+        );
+
+        assert_eq!(filtered.metadata.total_speakers, 3);
+        assert_eq!(filtered.metadata.total_sessions, 2);
+        assert_eq!(
+            filtered.metadata.rooms,
+            vec!["Room A", "Room B"],
+            "rooms recomputed from accepted sessions"
+        );
+        assert_eq!(filtered.metadata.job_titles, vec!["Dev Rel"]);
+        assert_eq!(filtered.metadata.companies, vec!["ACME"]);
+        assert_eq!(filtered.metadata.cached_at, "2026-10-21T00:00:00.000Z");
+    }
+
+    #[test]
+    fn retain_accepted_fail_closed_on_all_rejected() {
+        let mut payload: SessionizeDataPayload = serde_json::from_value(payload_json()).unwrap();
+        for s in payload.sessions.iter_mut() {
+            s.status = Some("Maybe".to_string());
+        }
+        let filtered = SessionizeClient::retain_accepted_sessions(payload);
+        assert!(filtered.sessions.is_empty());
+        assert!(filtered.speakers.is_empty());
     }
 }

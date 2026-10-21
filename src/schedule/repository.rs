@@ -1,10 +1,11 @@
 use worker::{d1::D1Database, wasm_bindgen::JsValue, Result as WorkerResult};
 
 use crate::schedule::types::{
-    CreateScheduleItem, EventScheduleItem, ScheduleOrderItem, SyncSessionizeResponse,
-    UpdateScheduleItem,
+    first_speaker_legacy, speakers_from_legacy, CreateScheduleItem, EventScheduleItem,
+    ScheduleOrderItem, ScheduleSpeaker, SyncSessionizeResponse, UpdateScheduleItem,
 };
 use crate::sessionize::types::EnrichedSession;
+use crate::speakers::repository::changed_rows;
 
 pub struct ScheduleRepository {
     db: D1Database,
@@ -74,12 +75,34 @@ impl ScheduleRepository {
         } else {
             0
         };
+        // Array wins when present; otherwise derive it from legacy singular fields.
+        let speakers = match input.speakers {
+            Some(sp) => sp,
+            None => speakers_from_legacy(
+                &input.speaker_id,
+                &input.speaker_name,
+                &input.speaker_role,
+                &input.speaker_company,
+                &input.speaker_avatar,
+                &input.speaker_social_url,
+            ),
+        };
+        let (
+            speaker_id,
+            speaker_name,
+            speaker_role,
+            speaker_company,
+            speaker_avatar,
+            speaker_social_url,
+        ) = first_speaker_legacy(&speakers);
+        let speakers_json = serde_json::to_string(&speakers).unwrap_or_else(|_| "[]".to_string());
 
-        let sql = "INSERT INTO event_schedules ( \
+        let create_sql = "INSERT INTO event_schedules ( \
                    id, event_slug, session_id, title, description, \
                    speaker_id, speaker_name, speaker_role, speaker_company, speaker_avatar, speaker_social_url, \
-                   room, track, starts_at, ends_at, session_type, is_service_session, is_active, display_order \
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                   room, track, starts_at, ends_at, session_type, is_service_session, is_active, display_order, \
+                   speakers_json \
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
         let bind_values = vec![
             JsValue::from_str(&id),
@@ -95,33 +118,27 @@ impl ScheduleRepository {
                 .as_deref()
                 .map(JsValue::from_str)
                 .unwrap_or(JsValue::NULL),
-            input
-                .speaker_id
+            speaker_id
                 .as_deref()
                 .map(JsValue::from_str)
                 .unwrap_or(JsValue::NULL),
-            input
-                .speaker_name
+            speaker_name
                 .as_deref()
                 .map(JsValue::from_str)
                 .unwrap_or(JsValue::NULL),
-            input
-                .speaker_role
+            speaker_role
                 .as_deref()
                 .map(JsValue::from_str)
                 .unwrap_or(JsValue::NULL),
-            input
-                .speaker_company
+            speaker_company
                 .as_deref()
                 .map(JsValue::from_str)
                 .unwrap_or(JsValue::NULL),
-            input
-                .speaker_avatar
+            speaker_avatar
                 .as_deref()
                 .map(JsValue::from_str)
                 .unwrap_or(JsValue::NULL),
-            input
-                .speaker_social_url
+            speaker_social_url
                 .as_deref()
                 .map(JsValue::from_str)
                 .unwrap_or(JsValue::NULL),
@@ -153,9 +170,14 @@ impl ScheduleRepository {
             JsValue::from_f64(is_service as f64),
             JsValue::from_f64(is_active as f64),
             JsValue::from_f64(display_order as f64),
+            JsValue::from_str(&speakers_json),
         ];
 
-        self.db.prepare(sql).bind(&bind_values)?.run().await?;
+        self.db
+            .prepare(create_sql)
+            .bind(&bind_values)?
+            .run()
+            .await?;
 
         self.get_schedule_item(event_slug, &id)
             .await?
@@ -179,12 +201,31 @@ impl ScheduleRepository {
         let session_id = input.session_id.or(existing.session_id);
         let title = input.title.unwrap_or(existing.title);
         let description = input.description.or(existing.description);
-        let speaker_id = input.speaker_id.or(existing.speaker_id);
-        let speaker_name = input.speaker_name.or(existing.speaker_name);
-        let speaker_role = input.speaker_role.or(existing.speaker_role);
-        let speaker_company = input.speaker_company.or(existing.speaker_company);
-        let speaker_avatar = input.speaker_avatar.or(existing.speaker_avatar);
-        let speaker_social_url = input.speaker_social_url.or(existing.speaker_social_url);
+        // Array wins when present (singular mirrors first entry); omitted keeps
+        // both the array and any legacy singular edits. `Some([])` clears all
+        // speaker columns.
+        let speakers_json = input
+            .speakers
+            .as_ref()
+            .map(|sp| serde_json::to_string(sp).unwrap_or_else(|_| "[]".to_string()));
+        let (
+            speaker_id,
+            speaker_name,
+            speaker_role,
+            speaker_company,
+            speaker_avatar,
+            speaker_social_url,
+        ) = match input.speakers {
+            Some(ref sp) => first_speaker_legacy(sp),
+            None => (
+                input.speaker_id.or(existing.speaker_id),
+                input.speaker_name.or(existing.speaker_name),
+                input.speaker_role.or(existing.speaker_role),
+                input.speaker_company.or(existing.speaker_company),
+                input.speaker_avatar.or(existing.speaker_avatar),
+                input.speaker_social_url.or(existing.speaker_social_url),
+            ),
+        };
         let room = input.room.or(existing.room);
         let track = input.track.or(existing.track);
         let starts_at = input.starts_at.or(existing.starts_at);
@@ -196,9 +237,10 @@ impl ScheduleRepository {
         let is_active = input.is_active.unwrap_or(existing.is_active);
         let display_order = input.display_order.unwrap_or(existing.display_order);
 
-        let sql = "UPDATE event_schedules SET \
+        let update_sql = "UPDATE event_schedules SET \
                    session_id = ?, title = ?, description = ?, \
                    speaker_id = ?, speaker_name = ?, speaker_role = ?, speaker_company = ?, speaker_avatar = ?, speaker_social_url = ?, \
+                   speakers_json = COALESCE(?, speakers_json), \
                    room = ?, track = ?, starts_at = ?, ends_at = ?, session_type = ?, is_service_session = ?, is_active = ?, display_order = ?, \
                    updated_at = datetime('now') \
                    WHERE event_slug = ? AND id = ?";
@@ -237,6 +279,10 @@ impl ScheduleRepository {
                 .as_deref()
                 .map(JsValue::from_str)
                 .unwrap_or(JsValue::NULL),
+            speakers_json
+                .as_deref()
+                .map(JsValue::from_str)
+                .unwrap_or(JsValue::NULL),
             room.as_deref()
                 .map(JsValue::from_str)
                 .unwrap_or(JsValue::NULL),
@@ -263,7 +309,11 @@ impl ScheduleRepository {
             JsValue::from_str(item_id),
         ];
 
-        self.db.prepare(sql).bind(&bind_values)?.run().await?;
+        self.db
+            .prepare(update_sql)
+            .bind(&bind_values)?
+            .run()
+            .await?;
         self.get_schedule_item(event_slug, item_id).await
     }
 
@@ -298,6 +348,12 @@ impl ScheduleRepository {
     }
 
     /// Sync or import sessions from Sessionize into event_schedules.
+    ///
+    /// Idempotent on (event_slug, session_id) via partial unique index;
+    /// INSERT OR IGNORE keeps concurrent imports conflict-safe. Insert-only
+    /// unless `overwrite` (admin edits stay untouched on the daily path).
+    /// `speaker_id` stores the local speaker-directory id when the speaker was
+    /// imported (matched by sessionize_id), otherwise the upstream Sessionize UUID.
     pub async fn sync_from_sessionize(
         &self,
         event_slug: &str,
@@ -305,9 +361,39 @@ impl ScheduleRepository {
         selected_ids: Option<Vec<String>>,
         overwrite: bool,
     ) -> WorkerResult<SyncSessionizeResponse> {
+        #[derive(serde::Deserialize)]
+        struct DirectorySpeakerLink {
+            id: String,
+            sessionize_id: String,
+        }
+
+        let directory_sql = "SELECT id, sessionize_id FROM event_speakers \
+                             WHERE event_slug = ? AND sessionize_id IS NOT NULL";
+        let directory = self
+            .db
+            .prepare(directory_sql)
+            .bind(&[JsValue::from_str(event_slug)])?
+            .all()
+            .await?
+            .results::<DirectorySpeakerLink>()?;
+        let resolve_speaker_id = |upstream: &str| -> String {
+            directory
+                .iter()
+                .find(|d| d.sessionize_id == upstream)
+                .map(|d| d.id.clone())
+                .unwrap_or_else(|| upstream.to_string())
+        };
+
         let current_items = self.list_admin_schedule(event_slug).await?;
         let mut imported = 0;
         let mut updated = 0;
+
+        let insert_sql = "INSERT OR IGNORE INTO event_schedules ( \
+                          id, event_slug, session_id, title, description, \
+                          speaker_id, speaker_name, speaker_role, speaker_company, speaker_avatar, speaker_social_url, \
+                          room, track, starts_at, ends_at, session_type, is_service_session, is_active, display_order, \
+                          speakers_json \
+                          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)";
 
         for (idx, sess) in sessions.into_iter().enumerate() {
             if let Some(ref sel) = selected_ids {
@@ -316,14 +402,33 @@ impl ScheduleRepository {
                 }
             }
 
-            let first_sp = sess.speakers.first();
-            let speaker_id = first_sp.map(|s| s.id.clone());
-            let speaker_name = first_sp.map(|s| s.name.clone());
-            let speaker_role =
-                first_sp.and_then(|s| s.job_title.clone().or_else(|| s.tag_line.clone()));
-            let speaker_company = first_sp.and_then(|s| s.company.clone());
-            let speaker_avatar = first_sp.and_then(|s| s.profile_picture.clone());
-            let speaker_social_url = first_sp.and_then(|s| s.linkedin_url.clone());
+            // Full speaker list; service sessions intentionally carry none.
+            // Local speaker-directory ids win over upstream Sessionize UUIDs.
+            let speakers: Vec<ScheduleSpeaker> = if sess.is_service_session {
+                Vec::new()
+            } else {
+                sess.speakers
+                    .iter()
+                    .map(|s| ScheduleSpeaker {
+                        id: Some(resolve_speaker_id(&s.id)),
+                        name: s.name.clone(),
+                        role: s.job_title.clone().or_else(|| s.tag_line.clone()),
+                        company: s.company.clone(),
+                        avatar: s.profile_picture.clone(),
+                        social_url: s.linkedin_url.clone(),
+                    })
+                    .collect()
+            };
+            let (
+                speaker_id,
+                speaker_name,
+                speaker_role,
+                speaker_company,
+                speaker_avatar,
+                speaker_social_url,
+            ) = first_speaker_legacy(&speakers);
+            let speakers_json =
+                serde_json::to_string(&speakers).unwrap_or_else(|_| "[]".to_string());
 
             let session_type = if sess.is_service_session {
                 Some("Service Session".to_string())
@@ -353,6 +458,7 @@ impl ScheduleRepository {
                             speaker_company,
                             speaker_avatar,
                             speaker_social_url,
+                            speakers: Some(speakers),
                             room: sess.room,
                             track: None,
                             starts_at: sess.starts_at,
@@ -367,30 +473,75 @@ impl ScheduleRepository {
                     updated += 1;
                 }
             } else {
-                self.create_schedule_item(
-                    event_slug,
-                    CreateScheduleItem {
-                        session_id: Some(sess.id.clone()),
-                        title: sess.title,
-                        description: sess.description,
-                        speaker_id,
-                        speaker_name,
-                        speaker_role,
-                        speaker_company,
-                        speaker_avatar,
-                        speaker_social_url,
-                        room: sess.room,
-                        track: None,
-                        starts_at: sess.starts_at,
-                        ends_at: sess.ends_at,
-                        session_type,
-                        is_service_session: Some(sess.is_service_session),
-                        is_active: Some(true),
-                        display_order: Some(idx as i32),
-                    },
-                )
-                .await?;
-                imported += 1;
+                let id = format!(
+                    "sched-{}",
+                    js_sys::Math::random().to_string().replace("0.", "")
+                );
+
+                let bind_values = vec![
+                    JsValue::from_str(&id),
+                    JsValue::from_str(event_slug),
+                    JsValue::from_str(&sess.id),
+                    JsValue::from_str(&sess.title),
+                    sess.description
+                        .as_deref()
+                        .map(JsValue::from_str)
+                        .unwrap_or(JsValue::NULL),
+                    speaker_id
+                        .as_deref()
+                        .map(JsValue::from_str)
+                        .unwrap_or(JsValue::NULL),
+                    speaker_name
+                        .as_deref()
+                        .map(JsValue::from_str)
+                        .unwrap_or(JsValue::NULL),
+                    speaker_role
+                        .as_deref()
+                        .map(JsValue::from_str)
+                        .unwrap_or(JsValue::NULL),
+                    speaker_company
+                        .as_deref()
+                        .map(JsValue::from_str)
+                        .unwrap_or(JsValue::NULL),
+                    speaker_avatar
+                        .as_deref()
+                        .map(JsValue::from_str)
+                        .unwrap_or(JsValue::NULL),
+                    speaker_social_url
+                        .as_deref()
+                        .map(JsValue::from_str)
+                        .unwrap_or(JsValue::NULL),
+                    sess.room
+                        .as_deref()
+                        .map(JsValue::from_str)
+                        .unwrap_or(JsValue::NULL),
+                    JsValue::NULL,
+                    sess.starts_at
+                        .as_deref()
+                        .map(JsValue::from_str)
+                        .unwrap_or(JsValue::NULL),
+                    sess.ends_at
+                        .as_deref()
+                        .map(JsValue::from_str)
+                        .unwrap_or(JsValue::NULL),
+                    session_type
+                        .as_deref()
+                        .map(JsValue::from_str)
+                        .unwrap_or(JsValue::NULL),
+                    JsValue::from_f64(if sess.is_service_session { 1.0 } else { 0.0 }),
+                    JsValue::from_f64(idx as f64),
+                    JsValue::from_str(&speakers_json),
+                ];
+
+                let res = self
+                    .db
+                    .prepare(insert_sql)
+                    .bind(&bind_values)?
+                    .run()
+                    .await?;
+                if changed_rows(&res) {
+                    imported += 1;
+                }
             }
         }
 

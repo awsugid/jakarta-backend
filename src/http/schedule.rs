@@ -6,12 +6,13 @@ use crate::http::errors::AppError;
 use crate::http::response::json_success_cors;
 use crate::schedule::repository::ScheduleRepository;
 use crate::schedule::types::{
-    CreateScheduleItem, EventScheduleResponse, ReorderScheduleBody, SyncSessionizeRequest,
-    UpdateScheduleItem,
+    CreateScheduleItem, EventScheduleResponse, ReorderScheduleBody, ScheduleSpeaker,
+    SyncSessionizeRequest, UpdateScheduleItem,
 };
 use crate::sessionize::client::SessionizeClient;
 
 const MAX_EVENT_SLUG_LEN: usize = 100;
+const MAX_SESSION_SPEAKERS: usize = 20;
 
 fn validate_event_slug(slug: &str) -> Result<(), AppError> {
     if slug.is_empty() || slug.len() > MAX_EVENT_SLUG_LEN {
@@ -22,6 +23,41 @@ fn validate_event_slug(slug: &str) -> Result<(), AppError> {
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return Err(AppError::BadRequest("Invalid eventSlug format".to_string()));
+    }
+    Ok(())
+}
+
+fn validate_speakers(speakers: &[ScheduleSpeaker]) -> Result<(), AppError> {
+    if speakers.len() > MAX_SESSION_SPEAKERS {
+        return Err(AppError::BadRequest(format!(
+            "speakers may contain at most {MAX_SESSION_SPEAKERS} entries"
+        )));
+    }
+    for s in speakers {
+        let name = s.name.trim();
+        if name.is_empty() || name.len() > 100 {
+            return Err(AppError::BadRequest(
+                "each speaker name must be between 1 and 100 characters".to_string(),
+            ));
+        }
+        for (label, url) in [
+            ("speaker avatar", &s.avatar),
+            ("speaker socialUrl", &s.social_url),
+        ] {
+            if let Some(u) = url.as_deref() {
+                let u = u.trim();
+                if !(u.is_empty() || u.starts_with("http://") || u.starts_with("https://")) {
+                    return Err(AppError::BadRequest(format!(
+                        "{label} must be an http:// or https:// URL"
+                    )));
+                }
+                if u.len() > 500 {
+                    return Err(AppError::BadRequest(format!(
+                        "{label} must be at most 500 characters"
+                    )));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -106,6 +142,9 @@ pub async fn handle_admin_create_schedule(
     if input.title.trim().is_empty() {
         return Err(AppError::BadRequest("title is required".to_string()).into());
     }
+    if let Some(ref speakers) = input.speakers {
+        validate_speakers(speakers)?;
+    }
 
     let db = ctx
         .d1("DB")
@@ -143,6 +182,10 @@ pub async fn handle_admin_update_schedule(
         .json::<UpdateScheduleItem>()
         .await
         .map_err(|e| AppError::BadRequest(format!("Invalid request body: {e}")))?;
+
+    if let Some(ref speakers) = input.speakers {
+        validate_speakers(speakers)?;
+    }
 
     let db = ctx
         .d1("DB")
@@ -248,20 +291,34 @@ pub async fn handle_admin_sync_sessionize(
     let body = req
         .json::<SyncSessionizeRequest>()
         .await
-        .unwrap_or(SyncSessionizeRequest {
-            session_ids: None,
-            overwrite: Some(true),
-            fresh: Some(false),
-        });
-
-    let client = SessionizeClient::default();
-    let sessionize_data = client
-        .get_data(body.fresh.unwrap_or(false))
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to fetch from Sessionize: {e}")))?;
+        .map_err(|e| AppError::BadRequest(format!("Invalid request body: {e}")))?;
 
     let db = ctx
         .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let client = SessionizeClient::default();
+    let sessionize_data = client
+        .get_data(&db, body.fresh.unwrap_or(false))
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch from Sessionize: {e}")))?;
+
+    let selected_speaker_ids = body.session_ids.as_ref().map(|ids| {
+        sessionize_data
+            .sessions
+            .iter()
+            .filter(|session| ids.contains(&session.id))
+            .flat_map(|session| session.speakers.iter().map(|speaker| speaker.id.clone()))
+            .collect()
+    });
+    crate::speakers::repository::SpeakerRepository::new(ctx.d1("DB")?)
+        .sync_from_sessionize(
+            event_slug,
+            sessionize_data.speakers,
+            selected_speaker_ids,
+            false,
+        )
+        .await
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let repo = ScheduleRepository::new(db);
 
@@ -270,7 +327,7 @@ pub async fn handle_admin_sync_sessionize(
             event_slug,
             sessionize_data.sessions,
             body.session_ids,
-            body.overwrite.unwrap_or(true),
+            body.overwrite.unwrap_or(false),
         )
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;

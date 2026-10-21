@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use worker::{d1::D1Database, wasm_bindgen::JsValue, Result as WorkerResult};
 
 use crate::sessionize::types::EnrichedSpeaker;
@@ -390,6 +392,12 @@ impl SpeakerRepository {
     }
 
     /// Sync or import speakers from Sessionize into event_speakers.
+    ///
+    /// Identity: upstream `EnrichedSpeaker.id` is persisted as `sessionize_id`
+    /// (unique per event via partial index). Daily imports are insert-only
+    /// (`overwrite = false`): admin edits are never overwritten. Legacy rows
+    /// without `sessionize_id` are linked by unique case-insensitive name match
+    /// only; ambiguous same-name rows are skipped, never merged blindly.
     pub async fn sync_from_sessionize(
         &self,
         event_slug: &str,
@@ -397,15 +405,55 @@ impl SpeakerRepository {
         selected_ids: Option<Vec<String>>,
         overwrite: bool,
     ) -> WorkerResult<SyncSpeakersResponse> {
-        let current_speakers = self.list_speakers(event_slug).await?;
+        #[derive(serde::Deserialize)]
+        struct SpeakerIdentityRow {
+            id: String,
+            name: String,
+            sessionize_id: Option<String>,
+        }
+
+        let identity_sql =
+            "SELECT id, name, sessionize_id FROM event_speakers WHERE event_slug = ?";
+        let identity_rows = self
+            .db
+            .prepare(identity_sql)
+            .bind(&[JsValue::from_str(event_slug)])?
+            .all()
+            .await?
+            .results::<SpeakerIdentityRow>()?;
+
+        // Stable identity: sessionize_id -> local directory id.
+        let mut linked_by_sessionize: HashMap<String, String> = HashMap::new();
+        // Legacy backfill candidates: lowercase trimmed name -> unlinked local ids.
+        let mut unlinked_by_name: HashMap<String, Vec<String>> = HashMap::new();
+        let mut known_ids: Vec<String> = Vec::new();
+        for row in &identity_rows {
+            known_ids.push(row.id.clone());
+            match row.sessionize_id.as_deref() {
+                Some(sid) => {
+                    linked_by_sessionize.insert(sid.to_string(), row.id.clone());
+                }
+                None => unlinked_by_name
+                    .entry(row.name.trim().to_lowercase())
+                    .or_default()
+                    .push(row.id.clone()),
+            }
+        }
+
+        // Upstream payload name counts: name backfill is only safe when the
+        // name is unique on BOTH sides; otherwise each upstream speaker gets
+        // its own stable-id row and the legacy row stays unlinked.
+        let upstream_name_counts: HashMap<String, usize> = speakers
+            .iter()
+            .map(|spk| spk.full_name.trim().to_lowercase())
+            .fold(HashMap::new(), |mut acc, name| {
+                *acc.entry(name).or_insert(0) += 1;
+                acc
+            });
+
         let mut imported = 0;
         let mut updated = 0;
         let mut skipped = 0;
-        let mut max_order = current_speakers
-            .iter()
-            .map(|s| s.display_order)
-            .max()
-            .unwrap_or(0);
 
         for spk in speakers {
             if let Some(ref sel) = selected_ids {
@@ -446,12 +494,34 @@ impl SpeakerRepository {
                 .clone()
                 .or_else(|| spk.links.first().map(|l| l.url.clone()));
 
-            // Find existing by matching name case-insensitively or matching ID
-            let existing = current_speakers
-                .iter()
-                .find(|s| s.name.trim().eq_ignore_ascii_case(name_trim));
+            let company_val = match company.as_deref() {
+                Some(c) if !c.trim().is_empty() => JsValue::from_str(c.trim()),
+                _ => JsValue::NULL,
+            };
+            let bio_val = match bio.as_deref() {
+                Some(b) if !b.trim().is_empty() => JsValue::from_str(b.trim()),
+                _ => JsValue::NULL,
+            };
+            let social_val = match social_url.as_deref() {
+                Some(u) if !u.trim().is_empty() => JsValue::from_str(u.trim()),
+                _ => JsValue::NULL,
+            };
 
-            if let Some(ex) = existing {
+            let name_key = name_trim.to_lowercase();
+            // Backfill by name only when the name uniquely identifies BOTH the
+            // single unlinked local row and exactly one upstream speaker;
+            // otherwise upstream speakers get separate stable-id rows and the
+            // legacy row stays unlinked.
+            let backfill_target = match (
+                unlinked_by_name.get(&name_key),
+                upstream_name_counts.get(&name_key).copied().unwrap_or(0),
+            ) {
+                (Some(c), 1) if c.len() == 1 => Some(c[0].clone()),
+                _ => None,
+            };
+
+            if let Some(ex_id) = linked_by_sessionize.get(&spk.id).cloned() {
+                // Already imported: only explicit overwrite touches fields.
                 if overwrite {
                     let update_sql = r#"
                         UPDATE event_speakers SET
@@ -461,19 +531,6 @@ impl SpeakerRepository {
                             updated_at = datetime('now')
                         WHERE event_slug = ? AND id = ?
                     "#;
-                    let company_val = match company.as_deref() {
-                        Some(c) if !c.trim().is_empty() => JsValue::from_str(c.trim()),
-                        _ => JsValue::NULL,
-                    };
-                    let bio_val = match bio.as_deref() {
-                        Some(b) if !b.trim().is_empty() => JsValue::from_str(b.trim()),
-                        _ => JsValue::NULL,
-                    };
-                    let social_val = match social_url.as_deref() {
-                        Some(u) if !u.trim().is_empty() => JsValue::from_str(u.trim()),
-                        _ => JsValue::NULL,
-                    };
-
                     self.db
                         .prepare(update_sql)
                         .bind(&[
@@ -486,7 +543,7 @@ impl SpeakerRepository {
                             bio_val,
                             social_val,
                             JsValue::from_str(event_slug),
-                            JsValue::from_str(&ex.id),
+                            JsValue::from_str(&ex_id),
                         ])?
                         .run()
                         .await?;
@@ -494,33 +551,77 @@ impl SpeakerRepository {
                 } else {
                     skipped += 1;
                 }
+            } else if let Some(ex_id) = backfill_target {
+                // Legacy backfill: deterministic unique match on both sides.
+                // Same-name speakers (local or upstream) are never merged blindly.
+                let link_sql = "UPDATE OR IGNORE event_speakers \
+                                SET sessionize_id = ?, updated_at = datetime('now') \
+                                WHERE event_slug = ? AND id = ? AND sessionize_id IS NULL";
+                let link_res = self
+                    .db
+                    .prepare(link_sql)
+                    .bind(&[
+                        JsValue::from_str(&spk.id),
+                        JsValue::from_str(event_slug),
+                        JsValue::from_str(&ex_id),
+                    ])?
+                    .run()
+                    .await?;
+                let linked_now = changed_rows(&link_res);
+                if linked_now {
+                    linked_by_sessionize.insert(spk.id.clone(), ex_id.clone());
+                    unlinked_by_name.remove(&name_key);
+                }
+                if overwrite {
+                    let update_sql = r#"
+                        UPDATE event_speakers SET
+                            role = ?, company = ?, photo_url = ?, talk_title = ?, talk_format = ?,
+                            topic_image_url = COALESCE(topic_image_url, ?),
+                            bio = COALESCE(?, bio), social_url = COALESCE(?, social_url),
+                            updated_at = datetime('now')
+                        WHERE event_slug = ? AND id = ?
+                    "#;
+                    self.db
+                        .prepare(update_sql)
+                        .bind(&[
+                            JsValue::from_str(role.trim()),
+                            company_val,
+                            JsValue::from_str(photo_url.trim()),
+                            JsValue::from_str(talk_title.trim()),
+                            JsValue::from_str(talk_format),
+                            JsValue::from_str(photo_url.trim()),
+                            bio_val,
+                            social_val,
+                            JsValue::from_str(event_slug),
+                            JsValue::from_str(&ex_id),
+                        ])?
+                        .run()
+                        .await?;
+                    updated += 1;
+                } else if linked_now {
+                    // Identity backfill only; display fields stay as admin left them.
+                    updated += 1;
+                } else {
+                    skipped += 1;
+                }
             } else {
-                max_order += 1;
                 let base_slug = slugify(name_trim);
-                let id = generate_unique_id(&base_slug, |cand| {
-                    current_speakers.iter().any(|s| s.id == cand)
-                });
+                let id = generate_unique_id(&base_slug, |cand| known_ids.iter().any(|k| k == cand));
+                known_ids.push(id.clone());
 
+                // INSERT OR IGNORE: unique (event_slug, sessionize_id) makes
+                // concurrent imports conflict-safe; display_order computed
+                // atomically in SQL so parallel runs cannot collide.
                 let insert_sql = r#"
-                    INSERT INTO event_speakers
+                    INSERT OR IGNORE INTO event_speakers
                       (event_slug, id, name, role, company, photo_url, talk_title, talk_format,
-                       topic_image_url, bio, social_url, is_active, display_order)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                       topic_image_url, bio, social_url, is_active, display_order, sessionize_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1,
+                            (SELECT COALESCE(MAX(display_order), 0) + 1 FROM event_speakers WHERE event_slug = ?),
+                            ?)
                 "#;
-                let company_val = match company.as_deref() {
-                    Some(c) if !c.trim().is_empty() => JsValue::from_str(c.trim()),
-                    _ => JsValue::NULL,
-                };
-                let bio_val = match bio.as_deref() {
-                    Some(b) if !b.trim().is_empty() => JsValue::from_str(b.trim()),
-                    _ => JsValue::NULL,
-                };
-                let social_val = match social_url.as_deref() {
-                    Some(u) if !u.trim().is_empty() => JsValue::from_str(u.trim()),
-                    _ => JsValue::NULL,
-                };
-
-                self.db
+                let res = self
+                    .db
                     .prepare(insert_sql)
                     .bind(&[
                         JsValue::from_str(event_slug),
@@ -534,11 +635,16 @@ impl SpeakerRepository {
                         JsValue::from_str(photo_url.trim()),
                         bio_val,
                         social_val,
-                        JsValue::from_f64(max_order as f64),
+                        JsValue::from_str(event_slug),
+                        JsValue::from_str(&spk.id),
                     ])?
                     .run()
                     .await?;
-                imported += 1;
+                if changed_rows(&res) {
+                    imported += 1;
+                } else {
+                    skipped += 1;
+                }
             }
         }
 
@@ -549,6 +655,17 @@ impl SpeakerRepository {
             skipped,
         })
     }
+}
+
+/// True when a D1 mutation actually changed rows (INSERT OR IGNORE conflicts
+/// report success with 0 changes and must count as skipped, not imported).
+pub(crate) fn changed_rows(res: &worker::d1::D1Result) -> bool {
+    res.meta()
+        .ok()
+        .flatten()
+        .and_then(|m| m.changes)
+        .unwrap_or(0)
+        > 0
 }
 
 fn slugify(input: &str) -> String {

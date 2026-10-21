@@ -417,23 +417,21 @@ pub async fn handle_admin_sync_sessionize_speakers(
         .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
     validate_event_slug(event_slug)?;
 
-    let body = req.json::<SyncSessionizeSpeakersRequest>().await.unwrap_or(
-        SyncSessionizeSpeakersRequest {
-            speaker_ids: None,
-            overwrite: Some(true),
-            fresh: Some(false),
-        },
-    );
-
-    let client = SessionizeClient::default();
-    let sessionize_data = client
-        .get_data(body.fresh.unwrap_or(false))
+    let body = req
+        .json::<SyncSessionizeSpeakersRequest>()
         .await
-        .map_err(|e| AppError::Internal(format!("Failed to fetch from Sessionize: {e}")))?;
+        .map_err(|e| AppError::BadRequest(format!("Invalid request body: {e}")))?;
 
     let db = ctx
         .d1("DB")
         .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    let client = SessionizeClient::default();
+    let sessionize_data = client
+        .get_data(&db, body.fresh.unwrap_or(false))
+        .await
+        .map_err(|e| AppError::Internal(format!("Failed to fetch from Sessionize: {e}")))?;
+
     let repo = SpeakerRepository::new(db);
 
     let result = repo
@@ -441,7 +439,7 @@ pub async fn handle_admin_sync_sessionize_speakers(
             event_slug,
             sessionize_data.speakers,
             body.speaker_ids,
-            body.overwrite.unwrap_or(true),
+            body.overwrite.unwrap_or(false),
         )
         .await
         .map_err(|e| AppError::Internal(e.to_string()))?;

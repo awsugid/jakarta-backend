@@ -15,6 +15,55 @@ mod statistics;
 mod storage;
 mod validation;
 
+#[event(scheduled)]
+async fn scheduled(_event: ScheduledEvent, env: Env, ctx: ScheduleContext) {
+    ctx.wait_until(async move {
+        if let Err(error) = refresh_sessionize(env).await {
+            console_error!("Daily Sessionize import failed: {}", error);
+            panic!("Daily Sessionize import failed: {}", error);
+        }
+    });
+}
+
+// ponytail: one Sessionize event; add per-event source settings when another event needs daily ingestion.
+async fn refresh_sessionize(env: Env) -> worker::Result<()> {
+    let event_slug = env.var("SESSIONIZE_EVENT_SLUG")?.to_string();
+    if event_slug.is_empty()
+        || event_slug.len() > 100
+        || !event_slug
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Err(worker::Error::RustError(
+            "Invalid SESSIONIZE_EVENT_SLUG".into(),
+        ));
+    }
+    let db = env.d1("DB")?;
+    let payload = sessionize::client::SessionizeClient::default()
+        .get_data(&db, true)
+        .await
+        .map_err(worker::Error::RustError)?;
+    console_log!(
+        "Sessionize snapshot refreshed: event={} speakers={} sessions={}",
+        event_slug,
+        payload.speakers.len(),
+        payload.sessions.len()
+    );
+    let speakers = speakers::repository::SpeakerRepository::new(env.d1("DB")?)
+        .sync_from_sessionize(&event_slug, payload.speakers, None, false)
+        .await?;
+    let schedule = schedule::repository::ScheduleRepository::new(db)
+        .sync_from_sessionize(&event_slug, payload.sessions, None, false)
+        .await?;
+    console_log!(
+        "Sessionize insert-only import completed: event={} speakers={} sessions={}",
+        event_slug,
+        speakers.imported,
+        schedule.imported
+    );
+    Ok(())
+}
+
 #[event(fetch)]
 async fn main(req: Request, env: Env, _ctx: Context) -> worker::Result<Response> {
     console_error_panic_hook::set_once();

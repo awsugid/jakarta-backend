@@ -12,6 +12,12 @@ ENABLE_DEBUG_AUTH = "false"
 PRETIX_DEFAULT_ORGANIZER = "AWSUserGroupJakarta"
 AVATAR_PUBLIC_BASE_URL = "https://avatars.awscommunity.id"
 
+[triggers]
+crons = ["0 0 * * *"]
+
+[vars]
+SESSIONIZE_EVENT_SLUG = "community-day-2026"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "jakarta-backend"
