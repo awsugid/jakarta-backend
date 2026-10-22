@@ -313,14 +313,6 @@ pub fn review_snapshot(
             });
             continue;
         }
-        if !item.is_service_session && item.speaker_ids.is_empty() && item.speakers.is_empty() {
-            conflicts.push(ConflictItem {
-                conflict_type: "missing-fields".into(),
-                item_id: Some(item.id.clone()),
-                detail: "non-service item needs at least one speaker".into(),
-            });
-            continue;
-        }
         let times = match item_times(item) {
             None => {
                 conflicts.push(ConflictItem {
@@ -554,6 +546,26 @@ mod tests {
             types(&out.report.conflicts),
             vec!["missing-fields".to_string()]
         );
+    }
+
+    #[test]
+    fn speakerless_nonservice_talk_publishes() {
+        let rooms = vec![room("r1", "Main", 0, false)];
+        let items = vec![item(
+            "a",
+            "Talk",
+            true,
+            &["r1"],
+            false,
+            Some("2026-10-21T09:00:00Z"),
+            Some("2026-10-21T10:00:00Z"),
+            vec![],
+        )];
+        let out = review_snapshot(&rooms, &[], &items, &HashMap::new(), &[]);
+        assert!(out.report.can_publish);
+        assert_eq!(out.report.included_count, 1);
+        assert!(out.report.conflicts.is_empty());
+        assert!(out.frozen[0].speakers.is_empty());
     }
 
     #[test]
