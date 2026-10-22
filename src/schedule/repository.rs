@@ -8,7 +8,7 @@ use crate::schedule::types::{
     ScheduleOrderItem, ScheduleSpeaker, SyncSessionizeResponse, UpdateFormatBody, UpdateRoomBody,
     UpdateScheduleItem,
 };
-use crate::sessionize::types::EnrichedSession;
+use crate::sessionize::types::{extract_languages, extract_levels, EnrichedSession};
 use crate::speakers::repository::changed_rows;
 
 /// Normalize a clearable optional text field: `Some("")` (or whitespace)
@@ -696,6 +696,10 @@ impl ScheduleRepository {
             input.room_ids.unwrap_or_default()
         };
         let room_ids_json = serde_json::to_string(&room_ids).unwrap_or_else(|_| "[]".to_string());
+        let languages_json = serde_json::to_string(&input.languages.unwrap_or_default())
+            .unwrap_or_else(|_| "[]".to_string());
+        let levels_json = serde_json::to_string(&input.levels.unwrap_or_default())
+            .unwrap_or_else(|_| "[]".to_string());
         // Legacy `room` label mirrors the first resolved room name.
         let rooms = self.list_rooms(event_slug).await?;
         let legacy_room = if all_rooms {
@@ -722,8 +726,9 @@ impl ScheduleRepository {
                    id, event_slug, session_id, title, description, \
                    speaker_id, speaker_name, speaker_role, speaker_company, speaker_avatar, speaker_social_url, \
                    room, track, starts_at, ends_at, session_type, is_service_session, is_active, display_order, \
-                   speakers_json, room_ids_json, all_rooms, speaker_ids_json, format_id \
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+                   speakers_json, room_ids_json, all_rooms, speaker_ids_json, format_id, \
+                   languages_json, levels_json \
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
         let bind_values = vec![
             JsValue::from_str(&id),
@@ -797,6 +802,8 @@ impl ScheduleRepository {
                 .as_deref()
                 .map(JsValue::from_str)
                 .unwrap_or(JsValue::NULL),
+            JsValue::from_str(&languages_json),
+            JsValue::from_str(&levels_json),
         ];
 
         self.db
@@ -884,6 +891,16 @@ impl ScheduleRepository {
             input.room_ids.unwrap_or(existing.room_ids)
         };
         let room_ids_json = serde_json::to_string(&room_ids).unwrap_or_else(|_| "[]".to_string());
+        // Metadata arrays are tri-state like speakers: omitted keeps, Some([])
+        // is an intentional clear, Some(values) replaces.
+        let languages_json = input
+            .languages
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()));
+        let levels_json = input
+            .levels
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".to_string()));
         let rooms = self.list_rooms(event_slug).await?;
         let legacy_room = if all_rooms {
             None
@@ -916,6 +933,7 @@ impl ScheduleRepository {
                    room = ?, track = ?, starts_at = ?, ends_at = ?, session_type = ?, format_id = ?, \
                    room_ids_json = ?, all_rooms = ?, \
                    is_service_session = ?, is_active = ?, display_order = ?, \
+                   languages_json = COALESCE(?, languages_json), levels_json = COALESCE(?, levels_json), \
                    revision = revision + 1, updated_at = datetime('now') \
                    WHERE event_slug = ? AND id = ? AND revision = ?";
 
@@ -990,6 +1008,14 @@ impl ScheduleRepository {
             JsValue::from_f64((if is_service { 1 } else { 0 }) as f64),
             JsValue::from_f64((if is_active { 1 } else { 0 }) as f64),
             JsValue::from_f64(display_order as f64),
+            languages_json
+                .as_deref()
+                .map(JsValue::from_str)
+                .unwrap_or(JsValue::NULL),
+            levels_json
+                .as_deref()
+                .map(JsValue::from_str)
+                .unwrap_or(JsValue::NULL),
             JsValue::from_str(event_slug),
             JsValue::from_str(item_id),
             JsValue::from_f64(input.revision as f64),
@@ -1107,8 +1133,9 @@ impl ScheduleRepository {
                           id, event_slug, session_id, title, description, \
                           speaker_id, speaker_name, speaker_role, speaker_company, speaker_avatar, speaker_social_url, \
                           room, track, starts_at, ends_at, session_type, is_service_session, is_active, display_order, \
-                          speakers_json, room_ids_json, all_rooms, speaker_ids_json \
-                          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, 0, ?, ?, '[]', 0, ?)";
+                          speakers_json, room_ids_json, all_rooms, speaker_ids_json, \
+                          languages_json, levels_json \
+                          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, 0, ?, ?, '[]', 0, ?, ?, ?)";
 
         for (idx, sess) in sessions.into_iter().enumerate() {
             if let Some(ref sel) = selected_ids {
@@ -1152,6 +1179,11 @@ impl ScheduleRepository {
                 .collect();
             let speaker_ids_json =
                 serde_json::to_string(&speaker_ids).unwrap_or_else(|_| "[]".to_string());
+            let languages = extract_languages(&sess.categories);
+            let levels = extract_levels(&sess.categories);
+            let languages_json =
+                serde_json::to_string(&languages).unwrap_or_else(|_| "[]".to_string());
+            let levels_json = serde_json::to_string(&levels).unwrap_or_else(|_| "[]".to_string());
 
             let session_type = if sess.is_service_session {
                 Some("Service Session".to_string())
@@ -1192,6 +1224,18 @@ impl ScheduleRepository {
                                 room_ids: None,
                                 all_rooms: None,
                                 format_id: None,
+                                // Metadata backfills only when missing: manual
+                                // admin edits are never overridden by a sync.
+                                languages: if ex.languages.is_empty() {
+                                    Some(languages.clone())
+                                } else {
+                                    None
+                                },
+                                levels: if ex.levels.is_empty() {
+                                    Some(levels.clone())
+                                } else {
+                                    None
+                                },
                                 starts_at: None,
                                 ends_at: None,
                                 session_type,
@@ -1253,6 +1297,8 @@ impl ScheduleRepository {
                     JsValue::from_f64(idx as f64),
                     JsValue::from_str(&speakers_json),
                     JsValue::from_str(&speaker_ids_json),
+                    JsValue::from_str(&languages_json),
+                    JsValue::from_str(&levels_json),
                 ];
 
                 let res = self

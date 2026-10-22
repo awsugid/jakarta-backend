@@ -43,11 +43,13 @@ BASE_MIGRATIONS = (
     "0019_event_speakers.sql",
     "0020_speaker_topic_image.sql",
     "0022_event_schedules.sql",
+    "0024_sessionize_cache.sql",
     "0025_schedule_speakers_json.sql",
     "0026_schedule_workspace.sql",
     "0027_publications_backfill.sql",
     "0028_talk_formats.sql",
     "0029_workspace_revision_triggers.sql",
+    "0030_schedule_languages_levels.sql",
 )
 MIGRATION_0023 = "0023_sessionize_identity.sql"
 
@@ -243,7 +245,9 @@ def test_schedule_idempotent_and_speaker_resolution():
              resolved, "Ada", None, None, None, None,
              "Technical Session", 0, 0,
              f'[{{"id":"{resolved}","name":"Ada"}}]',
-             json.dumps([resolved]) if linked else "[]"),
+             json.dumps([resolved]) if linked else "[]",
+             '["English"]' if sess_id == "sess-1" else "[]",
+             "[]"),
         )
         return changed(cur)
 
@@ -262,6 +266,11 @@ def test_schedule_idempotent_and_speaker_resolution():
     ).fetchone()
     assert drafts[:4] == (None, None, 0, "[]"), drafts
     assert json.loads(drafts[4]) == ["ada"], drafts
+    # session metadata (languages) persists on import
+    meta = db.execute(
+        "SELECT languages_json, levels_json FROM event_schedules WHERE session_id = 'sess-1'"
+    ).fetchone()
+    assert meta == ('["English"]', "[]"), meta
     for i in range(2):  # manual rows without session_id stay unconstrained
         db.execute(
             "INSERT INTO event_schedules (id, event_slug, title, display_order)"

@@ -18,6 +18,8 @@ use crate::sessionize::client::SessionizeClient;
 
 const MAX_EVENT_SLUG_LEN: usize = 100;
 const MAX_SESSION_SPEAKERS: usize = 20;
+const MAX_METADATA_VALUES: usize = 20;
+const MAX_METADATA_VALUE_LEN: usize = 100;
 
 fn internal(e: impl std::fmt::Display) -> AppError {
     AppError::Internal(e.to_string())
@@ -34,6 +36,27 @@ fn validate_event_slug(slug: &str) -> Result<(), AppError> {
         return Err(AppError::BadRequest("Invalid eventSlug format".to_string()));
     }
     Ok(())
+}
+
+/// Trim + bound a languages/levels array at the trust boundary. Returns the
+/// normalized list (caller stores it) or a 400.
+fn normalize_metadata_list(label: &str, values: Vec<String>) -> Result<Vec<String>, AppError> {
+    if values.len() > MAX_METADATA_VALUES {
+        return Err(AppError::BadRequest(format!(
+            "{label} may contain at most {MAX_METADATA_VALUES} values"
+        )));
+    }
+    let mut out = Vec::with_capacity(values.len());
+    for v in values {
+        let t = v.trim().to_string();
+        if t.is_empty() || t.len() > MAX_METADATA_VALUE_LEN {
+            return Err(AppError::BadRequest(format!(
+                "each {label} value must be between 1 and {MAX_METADATA_VALUE_LEN} characters"
+            )));
+        }
+        out.push(t);
+    }
+    Ok(out)
 }
 
 fn validate_speakers(speakers: &[ScheduleSpeaker]) -> Result<(), AppError> {
@@ -391,6 +414,14 @@ pub async fn handle_admin_create_schedule(
     if let Some(ref speakers) = input.speakers {
         validate_speakers(speakers)?;
     }
+    input.languages = match input.languages.take() {
+        Some(v) => Some(normalize_metadata_list("languages", v)?),
+        None => None,
+    };
+    input.levels = match input.levels.take() {
+        Some(v) => Some(normalize_metadata_list("levels", v)?),
+        None => None,
+    };
 
     let db = ctx
         .d1("DB")
@@ -435,6 +466,14 @@ pub async fn handle_admin_update_schedule(
             return Err(AppError::BadRequest("title cannot be empty".to_string()).into());
         }
     }
+    input.languages = match input.languages.take() {
+        Some(v) => Some(normalize_metadata_list("languages", v)?),
+        None => None,
+    };
+    input.levels = match input.levels.take() {
+        Some(v) => Some(normalize_metadata_list("levels", v)?),
+        None => None,
+    };
 
     let db = ctx
         .d1("DB")

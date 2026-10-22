@@ -452,6 +452,8 @@ mod tests {
             room_ids: rooms.iter().map(|s| s.to_string()).collect(),
             speaker_ids: Vec::new(),
             all_rooms,
+            languages: Vec::new(),
+            levels: Vec::new(),
             rooms: None,
             starts_at: start.map(String::from),
             ends_at: end.map(String::from),

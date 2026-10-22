@@ -50,8 +50,9 @@ def main() -> None:
     assert "NULL, NULL, NULL, NULL" in insert_sql, (
         "sessionize import SQL must NULL out room/track/starts/ends"
     )
-    assert re.search(r"\b0, \?, \?, '\[\]', 0, \?\)", insert_sql), (
+    assert re.search(r"\b0, \?, \?, '\[\]', 0, \?, \?, \?\)", insert_sql), (
         "sessionize import SQL must insert is_active=0, empty rooms, no speaker ids"
+        " plus languages/levels binds"
     )
     # Publish guard: numbered params must match the 3 binds the Rust code sends
     # (slug, snapshot, expected revision).
@@ -162,6 +163,10 @@ def main() -> None:
     # --- 0029 triggers: every relevant mutation bumps the workspace revision
     # atomically (single statement). Apply AFTER capturing revision 1 above.
     apply_migration(conn, "0029_workspace_revision_triggers.sql")
+    # 0030 adds languages/levels columns (and backfills from the Sessionize
+    # cache; the cache table must exist, hence 0024 first).
+    apply_migration(conn, "0024_sessionize_cache.sql")
+    apply_migration(conn, "0030_schedule_languages_levels.sql")
 
     # item INSERT bumps
     conn.execute(
@@ -191,6 +196,8 @@ def main() -> None:
             0,  # all_rooms
             "[]",  # speaker_ids_json
             None,  # format_id
+            "[]",  # languages_json
+            "[]",  # levels_json
         ),
     )
     assert rev() == 2, "item INSERT must bump workspace revision via trigger"
@@ -226,6 +233,8 @@ def main() -> None:
             0,  # is_service_session
             1,  # is_active
             0,  # display_order
+            None,  # languages_json (keep)
+            None,  # levels_json (keep)
             slug,
             "sched-new",
             1,  # revision
@@ -242,7 +251,7 @@ def main() -> None:
     # Empty-string starts_at is normalized to None by the Rust layer
     # (clearable/normalize_clear, unit-tested in repository.rs) before this SQL
     # runs; the bind below is exactly what the Rust code sends for a clear.
-    clear_vals = [None] * 25
+    clear_vals = [None] * 27
     clear_vals[1] = "Renamed"
     clear_vals[13] = None  # starts_at cleared (Rust normalized "" -> None)
     clear_vals[17] = json.dumps([workshop_id])
@@ -250,9 +259,9 @@ def main() -> None:
     clear_vals[19] = 0
     clear_vals[20] = 1
     clear_vals[21] = 0
-    clear_vals[22] = slug
-    clear_vals[23] = "sched-new"
-    clear_vals[24] = 2
+    clear_vals[24] = slug
+    clear_vals[25] = "sched-new"
+    clear_vals[26] = 2
     conn.execute(update_sql, tuple(clear_vals))
     assert (
         conn.execute(
@@ -261,16 +270,16 @@ def main() -> None:
         is None
     ), "empty-string starts_at must clear the column"
 
-    stale_vals = [None] * 25
+    stale_vals = [None] * 27
     stale_vals[1] = "Stale"
     stale_vals[17] = "[]"
     stale_vals[18] = 0
     stale_vals[19] = 0
     stale_vals[20] = 1
     stale_vals[21] = 0
-    stale_vals[22] = slug
-    stale_vals[23] = "sched-new"
-    stale_vals[24] = 1  # stale revision
+    stale_vals[24] = slug
+    stale_vals[25] = "sched-new"
+    stale_vals[26] = 1  # stale revision
     conn.execute(update_sql, tuple(stale_vals))
     still = conn.execute(
         "SELECT title, revision FROM event_schedules WHERE id = 'sched-new'"

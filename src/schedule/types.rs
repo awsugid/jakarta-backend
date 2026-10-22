@@ -142,6 +142,18 @@ pub struct EventScheduleItem {
     pub speaker_ids: Vec<String>,
     #[serde(default, alias = "all_rooms", deserialize_with = "deserialize_d1_bool")]
     pub all_rooms: bool,
+    #[serde(
+        default,
+        alias = "languages_json",
+        deserialize_with = "deserialize_id_list"
+    )]
+    pub languages: Vec<String>,
+    #[serde(
+        default,
+        alias = "levels_json",
+        deserialize_with = "deserialize_id_list"
+    )]
+    pub levels: Vec<String>,
     /// Resolved room names (admin listing and published snapshot only; not a column).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rooms: Option<Vec<String>>,
@@ -193,6 +205,10 @@ pub struct CreateScheduleItem {
     pub room_ids: Option<Vec<String>>,
     pub all_rooms: Option<bool>,
     pub format_id: Option<String>,
+    /// Spoken languages (Sessionize "Language" category values).
+    pub languages: Option<Vec<String>>,
+    /// Audience level (Sessionize level-category values).
+    pub levels: Option<Vec<String>>,
     pub starts_at: Option<String>,
     pub ends_at: Option<String>,
     pub session_type: Option<String>,
@@ -225,6 +241,10 @@ pub struct UpdateScheduleItem {
     pub all_rooms: Option<bool>,
     /// Format id; empty string clears the link (label falls back to sessionType).
     pub format_id: Option<String>,
+    /// Spoken languages; `None` (omitted) keeps existing, `Some([])` clears.
+    pub languages: Option<Vec<String>>,
+    /// Audience level; `None` (omitted) keeps existing, `Some([])` clears.
+    pub levels: Option<Vec<String>>,
     pub starts_at: Option<String>,
     pub ends_at: Option<String>,
     pub session_type: Option<String>,

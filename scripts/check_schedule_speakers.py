@@ -47,11 +47,13 @@ def db_with(*names):
 def fresh_db():
     return db_with(
         *PRE_0025,
+        "0024_sessionize_cache.sql",
         MIGRATION_0025,
         "0026_schedule_workspace.sql",
         "0027_publications_backfill.sql",
         "0028_talk_formats.sql",
         "0029_workspace_revision_triggers.sql",
+        "0030_schedule_languages_levels.sql",
     )
 
 def run_create(db, item_id, event, speakers_json, **cols):
@@ -65,6 +67,7 @@ def run_create(db, item_id, event, speakers_json, **cols):
             None, None, None, None, "Technical Session", 0, 1, 0,
             speakers_json,
             "[]", 0, "[]", None,
+            "[]", "[]",  # languages_json, levels_json
         ),
     )
     db.commit()
@@ -81,6 +84,7 @@ def run_update(db, event, item_id, speakers_json, title="T", speaker_name=None, 
             None,
             None, None, None, None, "Technical Session", None,
             "[]", 0, 0, 1, 0,
+            None, None,  # languages_json, levels_json (COALESCE keep)
             event, item_id, revision,
         ),
     )
@@ -185,13 +189,18 @@ def test_import_all_speakers_with_local_id_mapping_and_insert_only():
         IMPORT_SQL,
         ("sched-s1", "cd-2025", "sess-1", "Joint Talk", None,
          "ada", "Ada", None, None, None, None,
-         "Technical Session", 0, 0, two, '["ada","grace"]'),
+         "Technical Session", 0, 0, two, '["ada","grace"]',
+         '["English", "Bahasa Indonesia"]', "[]"),
     )
     assert cur.rowcount == 1
     assert speakers_of(db, "sched-s1") == json.loads(two)  # BOTH speakers stored
     assert db.execute(
         "SELECT speaker_id FROM event_schedules WHERE id = 'sched-s1'"
     ).fetchone()[0] == "ada"
+    # session metadata extracted from categories persists on import
+    assert json.loads(db.execute(
+        "SELECT languages_json FROM event_schedules WHERE id = 'sched-s1'"
+    ).fetchone()[0]) == ["English", "Bahasa Indonesia"]
 
     # replay: INSERT OR IGNORE is a no-op, admin edits to speakers survive (daily insert-only)
     db.execute(
@@ -202,7 +211,7 @@ def test_import_all_speakers_with_local_id_mapping_and_insert_only():
         IMPORT_SQL,
         ("sched-s1-dup", "cd-2025", "sess-1", "Joint Talk", None,
          "ada", "Ada", None, None, None, None,
-         "Technical Session", 0, 0, two, "[]"),
+         "Technical Session", 0, 0, two, "[]", "[]", "[]"),
     )
     assert cur.rowcount == 0  # conflict on (event_slug, session_id) ignored
     assert speakers_of(db, "sched-s1") == [{"name": "Admin Curated"}]
@@ -213,7 +222,7 @@ def test_import_all_speakers_with_local_id_mapping_and_insert_only():
         IMPORT_SQL,
         ("sched-s2", "cd-2025", "sess-2", "Lunch", None,
          None, None, None, None, None, None,
-         "Service Session", 1, 0, "[]", "[]"),
+         "Service Session", 1, 0, "[]", "[]", "[]", "[]"),
     )
     db.commit()
     assert speakers_of(db, "sched-s2") == []
