@@ -3,7 +3,7 @@ use worker::*;
 use crate::auth::admin::require_admin;
 use crate::config::AppConfig;
 use crate::http::errors::AppError;
-use crate::http::response::json_success_cors;
+use crate::http::response::{json_public_cached, json_success_cors};
 use crate::schedule::repository::{
     ItemMutationError, PublishError, RoomMutationError, ScheduleRepository,
 };
@@ -317,7 +317,7 @@ pub async fn handle_public_schedule(req: Request, ctx: RouteContext<()>) -> Resu
         event_slug,
         schedule: &schedule,
     };
-    json_success_cors(&body, &config.allowed_origins, origin.as_deref())
+    json_public_cached(&body, &config.allowed_origins, origin.as_deref())
 }
 
 /// GET /api/admin/events/:eventSlug/schedule — admin listing of all items
@@ -796,6 +796,62 @@ pub async fn handle_admin_update_room(mut req: Request, ctx: RouteContext<()>) -
         .map_err(|e| room_mutation_err("room", room_id, e))?;
 
     json_success_cors(&room, &config.allowed_origins, origin.as_deref())
+}
+
+/// DELETE /api/admin/events/:eventSlug/rooms/:roomId?revision=N — permanent
+/// deletion with revision CAS. Rejected (409, item titles included) while any
+/// draft item still references the room explicitly or via all_rooms (all_rooms
+/// items implicitly reference every active room). Published snapshots are
+/// frozen rows and never change; schedule rows are never deleted.
+pub async fn handle_admin_delete_room(req: Request, ctx: RouteContext<()>) -> Result<Response> {
+    let config = AppConfig::from_env(&ctx.env).map_err(|e| AppError::Internal(e.to_string()))?;
+    let db_opt = ctx.d1("DB").ok();
+    require_admin(&req, &config, db_opt.as_ref()).await?;
+    let origin = req.headers().get("Origin").ok().flatten();
+
+    let event_slug = ctx
+        .param("eventSlug")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: eventSlug".to_string()))?;
+    validate_event_slug(event_slug)?;
+    let room_id = ctx
+        .param("roomId")
+        .ok_or_else(|| AppError::BadRequest("Missing path parameter: roomId".to_string()))?;
+
+    let revision = req
+        .url()
+        .ok()
+        .and_then(|u| {
+            u.query_pairs()
+                .find(|(k, _)| k == "revision")
+                .and_then(|(_, v)| v.parse::<i32>().ok())
+        })
+        .ok_or_else(|| {
+            AppError::BadRequest("missing or invalid ?revision=N query parameter".to_string())
+        })?;
+
+    let db = ctx
+        .d1("DB")
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let repo = ScheduleRepository::new(db);
+
+    repo.delete_room(event_slug, room_id, revision)
+        .await
+        .map_err(internal)?
+        .map_err(|e| match e {
+            RoomMutationError::Occupied(items) => AppError::Conflict(format!(
+                "cannot permanently delete room {room_id}: still referenced by {} item(s): {}",
+                items.len(),
+                items
+                    .iter()
+                    .map(|(_, t)| format!("\"{t}\""))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+            other => room_mutation_err("room", room_id, other),
+        })?;
+
+    let body = serde_json::json!({ "success": true });
+    json_success_cors(&body, &config.allowed_origins, origin.as_deref())
 }
 
 /// GET /api/admin/events/:eventSlug/formats — list talk formats (archived included).

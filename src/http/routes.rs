@@ -500,6 +500,12 @@ pub fn register_routes(router: Router<'_, ()>) -> Router<'_, ()> {
                 crate::http::schedule::handle_admin_update_room(req, ctx).await
             },
         )
+        .delete_async(
+            "/api/admin/events/:eventSlug/rooms/:roomId",
+            |req, ctx| async move {
+                crate::http::schedule::handle_admin_delete_room(req, ctx).await
+            },
+        )
         .get_async(
             "/api/admin/events/:eventSlug/formats",
             |req, ctx| async move {

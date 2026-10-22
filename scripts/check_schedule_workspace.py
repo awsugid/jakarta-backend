@@ -345,6 +345,76 @@ def main() -> None:
     fmt_occupants = conn.execute(format_occupancy_sql, (slug, fmt_id)).fetchall()
     assert [o[0] for o in fmt_occupants] == ["sched-1"], fmt_occupants
 
+    # --- Room permanent deletion: atomic CAS + occupancy guard in one statement.
+    room_delete_sql = extract_sql(SCHEDULE_RS, "room_delete_sql")
+    # Guard must cover explicit room_ids_json refs, the legacy room label, and
+    # all_rooms items (they implicitly reference every ACTIVE room; the last
+    # `?` binds the target room's archived flag so archived rooms skip it).
+    assert "json_each(s.room_ids_json)" in room_delete_sql, room_delete_sql
+    assert "s.room = ?" in room_delete_sql, room_delete_sql
+    assert "s.all_rooms = 1 AND ? = 0" in room_delete_sql, room_delete_sql
+
+    def try_delete_room(rid: str, rev_arg) -> int:
+        name, archived = conn.execute(
+            "SELECT name, archived FROM event_rooms WHERE id = ?", (rid,)
+        ).fetchone()
+        return conn.execute(
+            room_delete_sql,
+            (slug, rid, rev_arg, slug, rid, name, archived),
+        ).rowcount
+
+    pub_before = conn.execute(
+        "SELECT snapshot_json FROM event_schedule_publications WHERE event_slug = ?", (slug,)
+    ).fetchone()[0]
+
+    # stale revision blocks
+    assert try_delete_room(main_id, 999) == 0
+    assert conn.execute("SELECT COUNT(*) FROM event_rooms WHERE id = ?", (main_id,)).fetchone()[0] == 1
+
+    # occupied: sched-1 references the main room explicitly
+    main_rev = conn.execute(
+        "SELECT revision FROM event_rooms WHERE id = ?", (main_id,)
+    ).fetchone()[0]
+    assert try_delete_room(main_id, main_rev) == 0
+    assert conn.execute("SELECT COUNT(*) FROM event_rooms WHERE id = ?", (main_id,)).fetchone()[0] == 1
+
+    # empty active room deletes and bumps the workspace revision via trigger
+    conn.execute(
+        "INSERT INTO event_rooms (id, event_slug, name, display_order, archived, revision,"
+        " created_at, updated_at) VALUES ('room-empty', ?, 'Loft', 9, 0, 1, datetime('now'),"
+        " datetime('now'))",
+        (slug,),
+    )
+    before = rev()
+    assert try_delete_room("room-empty", 1) == 1
+    assert conn.execute("SELECT COUNT(*) FROM event_rooms WHERE id = 'room-empty'" ).fetchone()[0] == 0
+    assert rev() == before + 1, "room DELETE must bump workspace revision via trigger"
+
+    # all_rooms items block deleting any ACTIVE room (candidates would change)
+    conn.execute(
+        "INSERT INTO event_schedules (id, event_slug, title, session_type, is_service_session,"
+        " is_active, display_order, all_rooms) VALUES ('sched-all', ?, 'Spans all rooms',"
+        " 'Service Session', 1, 1, 9, 1)",
+        (slug,),
+    )
+    conn.execute(
+        "INSERT INTO event_rooms (id, event_slug, name, display_order, archived, revision,"
+        " created_at, updated_at) VALUES ('room-loft', ?, 'Annex', 10, 0, 1, datetime('now'),"
+        " datetime('now'))",
+        (slug,),
+    )
+    assert try_delete_room("room-loft", 1) == 0
+    assert conn.execute("SELECT COUNT(*) FROM event_rooms WHERE id = 'room-loft'").fetchone()[0] == 1
+    # archiving sidesteps the all_rooms predicate (not a candidate anymore)
+    conn.execute("UPDATE event_rooms SET archived = 1 WHERE id = 'room-loft'")
+    assert try_delete_room("room-loft", 1) == 1
+    assert conn.execute("SELECT COUNT(*) FROM event_rooms WHERE id = 'room-loft'").fetchone()[0] == 0
+
+    # published snapshot stays frozen through every deletion path
+    assert conn.execute(
+        "SELECT snapshot_json FROM event_schedule_publications WHERE event_slug = ?", (slug,)
+    ).fetchone()[0] == pub_before, "room deletion must never touch published snapshots"
+
     print("check_schedule_workspace: OK")
 
 

@@ -39,6 +39,39 @@ pub fn with_cors(response: Response, allowed_origins: &str) -> worker::Result<Re
     Ok(response.with_headers(headers))
 }
 
+/// 200 JSON for PUBLIC cacheable endpoints (speakers/schedule carousels):
+/// reflected CORS + bounded browser/edge cache. Content is low-churn community
+/// data; a published change can take up to the TTL to appear. Never use for
+/// admin/auth responses.
+pub fn json_public_cached(
+    data: &impl Serialize,
+    allowed_origins: &str,
+    request_origin: Option<&str>,
+) -> worker::Result<Response> {
+    let response = Response::from_json(data)?;
+    let headers = cors_headers_reflected(allowed_origins, request_origin);
+    apply_public_cache_headers(&headers);
+    Ok(response.with_headers(headers))
+}
+
+/// CORS + bounded public cache for an already-built response (public endpoints
+/// only; mirrors `with_cors` plus the cache window).
+pub fn with_public_cache(response: Response, allowed_origins: &str) -> worker::Result<Response> {
+    let headers = cors_headers(allowed_origins);
+    apply_public_cache_headers(&headers);
+    Ok(response.with_headers(headers))
+}
+
+/// `with_headers` replaces the whole header set, so the JSON content type set
+/// by `Response::from_json` must be re-applied alongside the cache directives.
+fn apply_public_cache_headers(headers: &Headers) {
+    let _ = headers.set(
+        "Cache-Control",
+        "public, max-age=120, stale-while-revalidate=300",
+    );
+    let _ = headers.set("Content-Type", "application/json; charset=UTF-8");
+}
+
 /// Adds reflected-origin CORS headers to an existing response.
 #[allow(dead_code)]
 pub fn with_cors_origin(

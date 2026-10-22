@@ -3,7 +3,7 @@ use worker::*;
 use crate::auth::admin::require_admin;
 use crate::config::AppConfig;
 use crate::http::errors::AppError;
-use crate::http::response::{json_success_cors, with_cors};
+use crate::http::response::{json_success_cors, with_public_cache};
 use crate::sessionize::client::SessionizeClient;
 use crate::speakers::repository::{
     CreateSpeakerError, DeleteSpeakerError, ReorderSpeakersError, SpeakerRepository,
@@ -52,7 +52,7 @@ pub async fn handle_public_speakers(_req: Request, ctx: RouteContext<()>) -> Res
         speakers: &speakers,
     };
     let resp = Response::from_json(&body)?;
-    with_cors(resp, &config.allowed_origins)
+    with_public_cache(resp, &config.allowed_origins)
 }
 
 /// GET /api/admin/events/:eventSlug/speakers — admin listing of all speakers (including inactive).

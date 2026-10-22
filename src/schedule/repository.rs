@@ -217,6 +217,90 @@ impl ScheduleRepository {
             })?))
     }
 
+    /// Permanently delete a room (archived or active). The occupancy guard
+    /// (explicit room_ids_json refs, legacy room label, and all_rooms items —
+    /// which implicitly reference every ACTIVE room, hence the `? = 0` flag)
+    /// runs in the same statement as the revision CAS, so the check is atomic.
+    /// Schedule rows are never deleted; published snapshots live in
+    /// event_schedule_publications and stay frozen.
+    pub async fn delete_room(
+        &self,
+        event_slug: &str,
+        room_id: &str,
+        revision: i32,
+    ) -> WorkerResult<Result<(), RoomMutationError>> {
+        let existing = match self
+            .list_rooms(event_slug)
+            .await?
+            .into_iter()
+            .find(|r| r.id == room_id)
+        {
+            Some(r) => r,
+            None => return Ok(Err(RoomMutationError::NotFound)),
+        };
+        if existing.revision != revision {
+            return Ok(Err(RoomMutationError::StaleRevision));
+        }
+        let archived_flag = if existing.archived { 1.0 } else { 0.0 };
+        let room_delete_sql = "DELETE FROM event_rooms WHERE event_slug = ? AND id = ? AND revision = ? \
+                               AND NOT EXISTS (SELECT 1 FROM event_schedules s WHERE s.event_slug = ? \
+                               AND (EXISTS (SELECT 1 FROM json_each(s.room_ids_json) WHERE value = ?) \
+                               OR s.room = ? OR (s.all_rooms = 1 AND ? = 0)))";
+        let res = self
+            .db
+            .prepare(room_delete_sql)
+            .bind(&[
+                JsValue::from_str(event_slug),
+                JsValue::from_str(room_id),
+                JsValue::from_f64(revision as f64),
+                JsValue::from_str(event_slug),
+                JsValue::from_str(room_id),
+                JsValue::from_str(&existing.name),
+                JsValue::from_f64(archived_flag),
+            ])?
+            .run()
+            .await?;
+        if changed_rows(&res) {
+            return Ok(Ok(()));
+        }
+        // Zero rows with a matching pre-read: a concurrent writer moved the
+        // revision, or the occupancy guard blocked the delete.
+        match self
+            .list_rooms(event_slug)
+            .await?
+            .into_iter()
+            .find(|r| r.id == room_id)
+        {
+            None => Ok(Err(RoomMutationError::NotFound)),
+            Some(r) if r.revision != revision => Ok(Err(RoomMutationError::StaleRevision)),
+            Some(_) => {
+                let room_delete_blockers_sql = "SELECT id, title FROM event_schedules \
+                                                WHERE event_slug = ? AND (EXISTS (SELECT 1 FROM json_each(room_ids_json) WHERE value = ?) \
+                                                OR room = ? OR (all_rooms = 1 AND ? = 0))";
+                #[derive(serde::Deserialize)]
+                struct Row {
+                    id: String,
+                    title: String,
+                }
+                let rows = self
+                    .db
+                    .prepare(room_delete_blockers_sql)
+                    .bind(&[
+                        JsValue::from_str(event_slug),
+                        JsValue::from_str(room_id),
+                        JsValue::from_str(&existing.name),
+                        JsValue::from_f64(archived_flag),
+                    ])?
+                    .all()
+                    .await?
+                    .results::<Row>()?;
+                Ok(Err(RoomMutationError::Occupied(
+                    rows.into_iter().map(|r| (r.id, r.title)).collect(),
+                )))
+            }
+        }
+    }
+
     /// List talk formats for an event, ordered for display.
     pub async fn list_formats(&self, event_slug: &str) -> WorkerResult<Vec<EventFormat>> {
         let sql =
