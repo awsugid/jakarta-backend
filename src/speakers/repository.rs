@@ -165,6 +165,13 @@ impl SpeakerRepository {
             Some(c) if !c.trim().is_empty() => JsValue::from_str(c.trim()),
             _ => JsValue::NULL,
         };
+        // talk_title is NOT NULL in the legacy schema; the directory is
+        // profile-only, so absent/blank talk input stores "" (never a
+        // placeholder title). Provided values are kept for legacy clients.
+        let talk_title = match input.talk_title.as_deref() {
+            Some(t) if !t.trim().is_empty() => JsValue::from_str(t.trim()),
+            _ => JsValue::from_str(""),
+        };
         let talk_format = match input.talk_format.as_deref() {
             Some(f) if !f.trim().is_empty() => JsValue::from_str(f.trim()),
             _ => JsValue::from_str("Technical Session"),
@@ -198,7 +205,7 @@ impl SpeakerRepository {
                 JsValue::from_str(input.role.trim()),
                 company,
                 JsValue::from_str(input.photo_url.trim()),
-                JsValue::from_str(input.talk_title.trim()),
+                talk_title,
                 talk_format,
                 topic_image_url,
                 bio,
@@ -243,10 +250,6 @@ impl SpeakerRepository {
             Some(c) if !c.trim().is_empty() => JsValue::from_str(c.trim()),
             _ => JsValue::NULL,
         };
-        let talk_format = match input.talk_format.as_deref() {
-            Some(f) if !f.trim().is_empty() => JsValue::from_str(f.trim()),
-            _ => JsValue::from_str("Technical Session"),
-        };
         let topic_image_url = match input.topic_image_url.as_deref() {
             Some(t) if !t.trim().is_empty() => JsValue::from_str(t.trim()),
             _ => JsValue::NULL,
@@ -259,15 +262,16 @@ impl SpeakerRepository {
             Some(u) if !u.trim().is_empty() => JsValue::from_str(u.trim()),
             _ => JsValue::NULL,
         };
-
+        // Talk metadata (talk_title/talk_format) is owned by the schedule;
+        // directory updates intentionally never write those columns, so any
+        // legacy values are retained as-is. Input talk fields are accepted
+        // but ignored.
         let sql = r#"
             UPDATE event_speakers
             SET name = ?,
                 role = ?,
                 company = ?,
                 photo_url = ?,
-                talk_title = ?,
-                talk_format = ?,
                 topic_image_url = ?,
                 bio = ?,
                 social_url = ?,
@@ -283,8 +287,6 @@ impl SpeakerRepository {
                 JsValue::from_str(input.role.trim()),
                 company,
                 JsValue::from_str(input.photo_url.trim()),
-                JsValue::from_str(input.talk_title.trim()),
-                talk_format,
                 topic_image_url,
                 bio,
                 social_url,
@@ -480,16 +482,9 @@ impl SpeakerRepository {
                 .profile_picture
                 .clone()
                 .unwrap_or_else(|| "/images/avatar-placeholder.png".to_string());
-            let talk_title = spk
-                .sessions
-                .first()
-                .map(|s| s.title.clone())
-                .unwrap_or_else(|| "Technical Session".to_string());
-            let talk_format = if spk.is_top_speaker {
-                "Keynote"
-            } else {
-                "Technical Session"
-            };
+            // Directory import is profile-only: talk metadata is owned by
+            // sessions/schedules, so no talk title/format is derived from the
+            // Sessionize payload. Legacy column values are never touched.
             let bio = spk.bio.clone();
             let social_url = spk
                 .linkedin_url
@@ -527,7 +522,7 @@ impl SpeakerRepository {
                 if overwrite {
                     let update_sql = r#"
                         UPDATE event_speakers SET
-                            role = ?, company = ?, photo_url = ?, talk_title = ?, talk_format = ?,
+                            role = ?, company = ?, photo_url = ?,
                             topic_image_url = COALESCE(topic_image_url, ?),
                             bio = COALESCE(?, bio), social_url = COALESCE(?, social_url),
                             updated_at = datetime('now')
@@ -539,8 +534,6 @@ impl SpeakerRepository {
                             JsValue::from_str(role.trim()),
                             company_val,
                             JsValue::from_str(photo_url.trim()),
-                            JsValue::from_str(talk_title.trim()),
-                            JsValue::from_str(talk_format),
                             JsValue::from_str(photo_url.trim()),
                             bio_val,
                             social_val,
@@ -577,7 +570,7 @@ impl SpeakerRepository {
                 if overwrite {
                     let update_sql = r#"
                         UPDATE event_speakers SET
-                            role = ?, company = ?, photo_url = ?, talk_title = ?, talk_format = ?,
+                            role = ?, company = ?, photo_url = ?,
                             topic_image_url = COALESCE(topic_image_url, ?),
                             bio = COALESCE(?, bio), social_url = COALESCE(?, social_url),
                             updated_at = datetime('now')
@@ -589,8 +582,6 @@ impl SpeakerRepository {
                             JsValue::from_str(role.trim()),
                             company_val,
                             JsValue::from_str(photo_url.trim()),
-                            JsValue::from_str(talk_title.trim()),
-                            JsValue::from_str(talk_format),
                             JsValue::from_str(photo_url.trim()),
                             bio_val,
                             social_val,
@@ -632,8 +623,10 @@ impl SpeakerRepository {
                         JsValue::from_str(role.trim()),
                         company_val,
                         JsValue::from_str(photo_url.trim()),
-                        JsValue::from_str(talk_title.trim()),
-                        JsValue::from_str(talk_format),
+                        // NOT-NULL legacy column: empty string, never a derived
+                        // talk title; talk_format stays NULL (no derivation).
+                        JsValue::from_str(""),
+                        JsValue::NULL,
                         JsValue::from_str(photo_url.trim()),
                         bio_val,
                         social_val,

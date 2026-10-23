@@ -88,7 +88,7 @@ def upsert_speaker(db, event, upstream_id, name):
     cur = db.execute(
         SPEAKER_INSERT_SQL,
         (event, spk_id, name, "Speaker", None,
-         "/images/avatar-placeholder.png", "Talk", "Technical Session",
+         "/images/avatar-placeholder.png", "", None,
          None, None, None, event, upstream_id),
     )
     return changed(cur)

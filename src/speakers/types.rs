@@ -34,6 +34,10 @@ pub struct EventSpeaker {
 }
 
 /// POST /api/admin/events/:eventSlug/speakers body.
+///
+/// The directory is profile-only: talk metadata is owned by sessions/schedules.
+/// `talk_title`/`talk_format` stay accepted for legacy clients but are optional
+/// and no longer authoritative.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EventSpeakerCreate {
@@ -41,7 +45,7 @@ pub struct EventSpeakerCreate {
     pub role: String,
     pub company: Option<String>,
     pub photo_url: String,
-    pub talk_title: String,
+    pub talk_title: Option<String>,
     pub talk_format: Option<String>,
     pub topic_image_url: Option<String>,
     pub bio: Option<String>,
@@ -57,7 +61,11 @@ pub struct EventSpeakerUpdate {
     pub role: String,
     pub company: Option<String>,
     pub photo_url: String,
-    pub talk_title: String,
+    // Accepted for legacy-client body compatibility; updates never write talk
+    // metadata (owned by the schedule), so the fields are never read.
+    #[allow(dead_code)]
+    pub talk_title: Option<String>,
+    #[allow(dead_code)]
     pub talk_format: Option<String>,
     pub topic_image_url: Option<String>,
     pub bio: Option<String>,
@@ -105,4 +113,38 @@ pub struct SyncSpeakersResponse {
     pub imported: usize,
     pub updated: usize,
     pub skipped: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_body_without_talk_fields_deserializes() {
+        let body: EventSpeakerCreate =
+            serde_json::from_str(r#"{"name":"Ada","role":"Speaker","photoUrl":"p.png"}"#)
+                .expect("talk fields must not be required");
+        assert_eq!(body.talk_title, None);
+        assert_eq!(body.talk_format, None);
+    }
+
+    #[test]
+    fn create_body_with_legacy_talk_fields_still_deserializes() {
+        let body: EventSpeakerCreate = serde_json::from_str(
+            r#"{"name":"Ada","role":"Speaker","photoUrl":"p.png","talkTitle":"T","talkFormat":"Keynote"}"#,
+        )
+        .expect("legacy talk fields stay accepted");
+        assert_eq!(body.talk_title.as_deref(), Some("T"));
+        assert_eq!(body.talk_format.as_deref(), Some("Keynote"));
+    }
+
+    #[test]
+    fn update_body_without_talk_fields_deserializes() {
+        let body: EventSpeakerUpdate = serde_json::from_str(
+            r#"{"name":"Ada","role":"Speaker","photoUrl":"p.png","isActive":true}"#,
+        )
+        .expect("talk fields must not be required");
+        assert_eq!(body.talk_title, None);
+        assert_eq!(body.talk_format, None);
+    }
 }

@@ -16,6 +16,27 @@ use crate::speakers::types::{
 
 const MAX_EVENT_SLUG_LEN: usize = 100;
 
+/// Shared profile validation for create/update. The directory is profile-only;
+/// talk metadata is owned by the schedule, so only name/role/photo are checked.
+fn validate_speaker_profile(name: &str, role: &str, photo_url: &str) -> Result<(), AppError> {
+    if name.trim().is_empty() || name.trim().len() > 100 {
+        return Err(AppError::BadRequest(
+            "Speaker name must be between 1 and 100 characters".to_string(),
+        ));
+    }
+    if role.trim().is_empty() || role.trim().len() > 100 {
+        return Err(AppError::BadRequest(
+            "Speaker role must be between 1 and 100 characters".to_string(),
+        ));
+    }
+    if photo_url.trim().is_empty() || photo_url.trim().len() > 500 {
+        return Err(AppError::BadRequest(
+            "Photo URL must be between 1 and 500 characters".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_event_slug(slug: &str) -> Result<(), AppError> {
     if slug.is_empty() || slug.len() > MAX_EVENT_SLUG_LEN {
         return Err(AppError::BadRequest("Invalid eventSlug".to_string()));
@@ -130,30 +151,7 @@ pub async fn handle_admin_create_speaker(
         .await
         .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
 
-    if input.name.trim().is_empty() || input.name.trim().len() > 100 {
-        return Err(AppError::BadRequest(
-            "Speaker name must be between 1 and 100 characters".to_string(),
-        )
-        .into());
-    }
-    if input.role.trim().is_empty() || input.role.trim().len() > 100 {
-        return Err(AppError::BadRequest(
-            "Speaker role must be between 1 and 100 characters".to_string(),
-        )
-        .into());
-    }
-    if input.photo_url.trim().is_empty() || input.photo_url.trim().len() > 500 {
-        return Err(AppError::BadRequest(
-            "Photo URL must be between 1 and 500 characters".to_string(),
-        )
-        .into());
-    }
-    if input.talk_title.trim().is_empty() || input.talk_title.trim().len() > 200 {
-        return Err(AppError::BadRequest(
-            "Talk title must be between 1 and 200 characters".to_string(),
-        )
-        .into());
-    }
+    validate_speaker_profile(&input.name, &input.role, &input.photo_url)?;
 
     let db = ctx
         .d1("DB")
@@ -199,30 +197,7 @@ pub async fn handle_admin_update_speaker(
         .await
         .map_err(|e| AppError::BadRequest(format!("Invalid JSON body: {e}")))?;
 
-    if input.name.trim().is_empty() || input.name.trim().len() > 100 {
-        return Err(AppError::BadRequest(
-            "Speaker name must be between 1 and 100 characters".to_string(),
-        )
-        .into());
-    }
-    if input.role.trim().is_empty() || input.role.trim().len() > 100 {
-        return Err(AppError::BadRequest(
-            "Speaker role must be between 1 and 100 characters".to_string(),
-        )
-        .into());
-    }
-    if input.photo_url.trim().is_empty() || input.photo_url.trim().len() > 500 {
-        return Err(AppError::BadRequest(
-            "Photo URL must be between 1 and 500 characters".to_string(),
-        )
-        .into());
-    }
-    if input.talk_title.trim().is_empty() || input.talk_title.trim().len() > 200 {
-        return Err(AppError::BadRequest(
-            "Talk title must be between 1 and 200 characters".to_string(),
-        )
-        .into());
-    }
+    validate_speaker_profile(&input.name, &input.role, &input.photo_url)?;
 
     let db = ctx
         .d1("DB")
@@ -445,4 +420,20 @@ pub async fn handle_admin_sync_sessionize_speakers(
         .map_err(|e| AppError::Internal(e.to_string()))?;
 
     json_success_cors(&result, &config.allowed_origins, origin.as_deref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_validation_checks_name_role_photo_only() {
+        // Regression: talk metadata must not be part of speaker validation.
+        assert!(validate_speaker_profile("Ada", "Speaker", "p.png").is_ok());
+        assert!(validate_speaker_profile("", "Speaker", "p.png").is_err());
+        assert!(validate_speaker_profile(&"x".repeat(101), "Speaker", "p.png").is_err());
+        assert!(validate_speaker_profile("Ada", "  ", "p.png").is_err());
+        assert!(validate_speaker_profile("Ada", "Speaker", "").is_err());
+        assert!(validate_speaker_profile("Ada", "Speaker", &"u".repeat(501)).is_err());
+    }
 }
