@@ -489,7 +489,7 @@ mod tests {
         let a = parse_rfc3339_epoch("2026-10-21T09:00:00Z").unwrap();
         let b = parse_rfc3339_epoch("2026-10-21T16:00:00+07:00").unwrap();
         assert_eq!(a, b);
-        assert_eq!(parse_rfc3339_epoch("2026-10-21T09:00:00.500Z"), Some(a + 0));
+        assert_eq!(parse_rfc3339_epoch("2026-10-21T09:00:00.500Z"), Some(a));
         assert!(parse_rfc3339_epoch("2026-10-21").is_none());
         assert!(parse_rfc3339_epoch("2026-13-01T00:00:00Z").is_none());
         assert!(parse_rfc3339_epoch("2026-10-21T09:00:00").is_none());
